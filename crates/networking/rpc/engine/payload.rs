@@ -491,7 +491,6 @@ impl RpcHandler for NewPayloadWithWitnessV5Request {
     }
 }
 
-
 impl RpcHandler for NewPayloadV6Request {
     fn parse(params: &Option<Vec<Value>>) -> Result<Self, RpcErr> {
         let params = params
@@ -595,6 +594,7 @@ impl RpcHandler for NewPayloadV6Request {
             block,
             self.expected_blob_versioned_hashes.clone(),
             bal,
+            false,
         )
         .await?;
 
@@ -1942,6 +1942,7 @@ mod tests {
     }
 }
 
+#[cfg(test)]
 mod v6_tests {
     use super::*;
     use serde_json::json;
