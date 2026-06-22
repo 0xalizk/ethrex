@@ -84,6 +84,20 @@ impl From<Bytes20> for [u8; 20] {
     }
 }
 
+// ── Withdrawal ─────────────────────────────────────────────────────────────
+//
+// Fork-invariant from Shanghai onward: Osaka and Amsterdam reuse this exact
+// shape, so it lives here rather than in a per-fork module.
+
+/// SSZ `Withdrawal` container (CL withdrawal queue entry).
+#[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
+pub struct Withdrawal {
+    pub index: u64,
+    pub validator_index: u64,
+    pub address: Bytes20,
+    pub amount: u64,
+}
+
 /// Spec limit on raw block_access_list bytes per payload (EIP-7928).
 pub const MAX_BLOCK_ACCESS_LIST_BYTES: usize = 16_777_216; // 16 MiB
 

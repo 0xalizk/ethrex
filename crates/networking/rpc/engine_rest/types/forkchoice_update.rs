@@ -15,9 +15,9 @@ use libssz_types::{SszBitvector, SszList};
 
 use super::blobs::CELLS_PER_EXT_BLOB;
 use super::common::ForkchoiceState;
-use super::{amsterdam, cancun, paris, prague, shanghai};
+use super::{amsterdam, osaka};
 
-// ── Macro: generate the Paris..Prague ForkchoiceUpdate types ──────────────────
+// ── Macro: generate the per-fork ForkchoiceUpdate types ───────────────────────
 
 macro_rules! forkchoice_update {
     ($name:ident, $attrs:ty) => {
@@ -29,13 +29,7 @@ macro_rules! forkchoice_update {
     };
 }
 
-forkchoice_update!(ParisForkchoiceUpdate, paris::PayloadAttributes);
-forkchoice_update!(ShanghaiForkchoiceUpdate, shanghai::PayloadAttributes);
-forkchoice_update!(CancunForkchoiceUpdate, cancun::PayloadAttributes);
-forkchoice_update!(PragueForkchoiceUpdate, prague::PayloadAttributes);
-
-/// Osaka uses Prague-shaped attributes (no new fields).
-pub type OsakaForkchoiceUpdate = PragueForkchoiceUpdate;
+forkchoice_update!(OsakaForkchoiceUpdate, osaka::PayloadAttributes);
 
 // ── Amsterdam: state + payload_attributes + custody_columns ───────────────────
 

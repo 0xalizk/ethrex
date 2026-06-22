@@ -1,5 +1,5 @@
 //! Deterministic synthetic fixture generators for the engine transport
-//! benchmarks. Covers every fork era of the engine API (Paris → Amsterdam).
+//! benchmarks. Covers the Fusaka-era engine API forks (Osaka and Amsterdam).
 //!
 //! This file is the single canonical copy: the criterion bench
 //! (`benches/engine_transport.rs`) includes it as a sibling module, and the
@@ -7,18 +7,14 @@
 //! Keep it free of bench-target-specific code.
 //!
 //! Shape map (JSON-RPC method ↔ REST/SSZ type):
-//! - newPayload:  V1 ↔ `paris::Envelope`, V2 ↔ `shanghai::Envelope`,
-//!   V3 ↔ `cancun::Envelope`, V4 ↔ `prague::Envelope` (Prague AND Osaka),
-//!   V5 ↔ `amsterdam::Envelope` (BAL + slot)
-//! - getPayload:  V1 ↔ `BuiltPayloadParis` (JSON is a bare payload; SSZ adds
-//!   block_value — a real spec asymmetry), V2 ↔ `BuiltPayloadShanghai`,
-//!   V3 ↔ `BuiltPayloadCancun` (1 proof/blob), V4 ↔ `BuiltPayloadPrague`
-//!   (+requests), V5 ↔ `BuiltPayloadOsaka` (cell proofs), V6 ↔ `BuiltPayloadAmsterdam`
-//! - blobs:       `getBlobsV1` ↔ `/blobs/v1` (1 proof), `getBlobsV2/V3` ↔
-//!   `/blobs/v2`,`/blobs/v3` (cell proofs), `/blobs/v4` is REST-only (no JSON method)
-//! - bodies:      `…ByRangeV1` ↔ `BodiesResponseParis`/`BodiesResponseShanghai`
-//!   (Shanghai shape serves the shanghai→osaka paths), `…ByRangeV2` ↔
-//!   `BodiesResponseAmsterdam` (BAL per body)
+//! - newPayload:  V4 ↔ `osaka::Envelope` (withdrawals + blob-gas fields +
+//!   requests), V5 ↔ `amsterdam::Envelope` (BAL + slot)
+//! - getPayload:  V5 ↔ `BuiltPayloadOsaka` (cell proofs),
+//!   V6 ↔ `BuiltPayloadAmsterdam`
+//! - blobs:       `getBlobsV2/V3` ↔ `/blobs/v2`,`/blobs/v3` (cell proofs),
+//!   `/blobs/v4` is REST-only (no JSON method)
+//! - bodies:      `…ByRangeV1` ↔ `BodiesResponseOsaka` (serves the osaka
+//!   paths), `…ByRangeV2` ↔ `BodiesResponseAmsterdam` (BAL per body)
 
 use bytes::Bytes;
 use ethrex_common::{
@@ -36,21 +32,11 @@ use ethrex_rpc::engine_rest::types::amsterdam::{
     ExecutionPayload as SszAmsterdamPayload, ExecutionPayloadEnvelope as SszAmsterdamEnvelope,
 };
 use ethrex_rpc::engine_rest::types::built_payload::{
-    BlobsBundleV1, BlobsBundleV2, BuiltPayloadAmsterdam, BuiltPayloadCancun, BuiltPayloadOsaka,
-    BuiltPayloadParis, BuiltPayloadPrague, BuiltPayloadShanghai, ExecutionRequestsList,
-};
-use ethrex_rpc::engine_rest::types::cancun::{
-    ExecutionPayload as SszCancunPayload, ExecutionPayloadEnvelope as SszCancunEnvelope,
+    BlobsBundleV2, BuiltPayloadAmsterdam, BuiltPayloadOsaka, ExecutionRequestsList,
 };
 use ethrex_rpc::engine_rest::types::common::Bytes20;
-use ethrex_rpc::engine_rest::types::paris::{
-    ExecutionPayload as SszParisPayload, ExecutionPayloadEnvelope as SszParisEnvelope,
-};
-use ethrex_rpc::engine_rest::types::prague::{
-    ExecutionPayload as SszPraguePayload, ExecutionPayloadEnvelope as SszPragueEnvelope,
-};
-use ethrex_rpc::engine_rest::types::shanghai::{
-    ExecutionPayload as SszShanghaiPayload, ExecutionPayloadEnvelope as SszShanghaiEnvelope,
+use ethrex_rpc::engine_rest::types::osaka::{
+    ExecutionPayload as SszOsakaPayload, ExecutionPayloadEnvelope as SszOsakaEnvelope,
 };
 use ethrex_rpc::types::payload::{
     ExecutionPayload as JsonExecutionPayload, ExecutionPayloadResponse,
@@ -89,19 +75,6 @@ const BLOCK_VALUE_WEI: u64 = 1_234_567_890_123_456;
 /// Synthetic slot number for Amsterdam payloads.
 #[allow(dead_code)]
 pub const DEFAULT_SLOT_NUMBER: u64 = 4_242;
-
-/// Which era's optional payload fields are present (the JSON struct is shared
-/// across forks with `Option` fields; the SSZ structs are per-fork).
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum PayloadEra {
-    /// No withdrawals, no blob-gas fields.
-    Paris,
-    /// Withdrawals, no blob-gas fields.
-    Shanghai,
-    /// Withdrawals + blob-gas fields (Cancun, Prague, Osaka).
-    Cancun,
-}
 
 // ── Internal raw fields ──────────────────────────────────────────────────────
 
@@ -152,15 +125,11 @@ fn build_raw_fields(seed: u64, tx_count: usize) -> RawPayloadFields {
     }
 }
 
-/// Build a Block from raw fields with the era's optional fields. Transactions
-/// are empty (the bench doesn't need to RLP-decode them — `from_block` will
-/// re-encode them). `slot_number` is set for Amsterdam-shape payloads.
-fn raw_to_block(f: &RawPayloadFields, era: PayloadEra, slot_number: Option<u64>) -> Block {
-    let blob_fields = if era == PayloadEra::Cancun {
-        Some(0)
-    } else {
-        None
-    };
+/// Build a Block from raw fields. Transactions are empty (the bench doesn't need
+/// to RLP-decode them — `from_block` will re-encode them). Both served eras
+/// (Osaka, Amsterdam) carry withdrawals + blob-gas fields; `slot_number` is set
+/// for Amsterdam-shape payloads.
+fn raw_to_block(f: &RawPayloadFields, slot_number: Option<u64>) -> Block {
     let header = BlockHeader {
         parent_hash: H256::from(f.parent_hash),
         coinbase: Address::from(f.fee_recipient),
@@ -174,19 +143,15 @@ fn raw_to_block(f: &RawPayloadFields, era: PayloadEra, slot_number: Option<u64>)
         timestamp: f.timestamp,
         extra_data: Bytes::from(f.extra_data.clone()),
         base_fee_per_gas: Some(f.base_fee_per_gas),
-        blob_gas_used: blob_fields,
-        excess_blob_gas: blob_fields,
+        blob_gas_used: Some(0),
+        excess_blob_gas: Some(0),
         slot_number,
         ..Default::default()
     };
     let body = BlockBody {
         transactions: vec![],
         ommers: vec![],
-        withdrawals: if era == PayloadEra::Paris {
-            None
-        } else {
-            Some(vec![])
-        },
+        withdrawals: Some(vec![]),
     };
     Block::new(header, body)
 }
@@ -272,17 +237,17 @@ fn requests_ssz(raw: &[Vec<u8>]) -> ExecutionRequestsList {
 
 // ── newPayload fixtures (JSON side) ──────────────────────────────────────────
 
-/// JSON-shape ExecutionPayload for the given era (`engine_newPayloadV1..V4`
-/// param 0). Requests (V4) ride as a separate param and are empty in the
-/// benchmarks, matching the SSZ envelopes.
+/// JSON-shape Osaka ExecutionPayload (`engine_newPayloadV4` param 0). Requests
+/// ride as a separate param and are empty in the benchmarks, matching the SSZ
+/// envelopes.
 #[allow(dead_code)]
-pub fn payload_json(seed: u64, tx_count: usize, era: PayloadEra) -> JsonExecutionPayload {
+pub fn payload_json(seed: u64, tx_count: usize) -> JsonExecutionPayload {
     let f = build_raw_fields(seed, tx_count);
-    json_payload_from_raw(&f, era, None, None)
+    json_payload_from_raw(&f, None, None)
 }
 
 /// JSON-shape Amsterdam ExecutionPayload (`engine_newPayloadV5` param 0):
-/// Cancun-era payload + `blockAccessList` (RLP hex) + `slotNumber`.
+/// Osaka-era payload + `blockAccessList` (RLP hex) + `slotNumber`.
 #[allow(dead_code)]
 pub fn amsterdam_payload_json(
     seed: u64,
@@ -291,46 +256,17 @@ pub fn amsterdam_payload_json(
 ) -> JsonExecutionPayload {
     let f = build_raw_fields(seed, tx_count);
     let bal = build_synthetic_bal(seed, bal_accounts);
-    json_payload_from_raw(&f, PayloadEra::Cancun, Some(bal), Some(DEFAULT_SLOT_NUMBER))
+    json_payload_from_raw(&f, Some(bal), Some(DEFAULT_SLOT_NUMBER))
 }
 
 // ── newPayload fixtures (SSZ side) ───────────────────────────────────────────
 
-/// `POST /engine/v2/paris/payloads` body.
+/// `POST /engine/v2/osaka/payloads` body.
 #[allow(dead_code)]
-pub fn paris_newpayload_ssz(seed: u64, tx_count: usize) -> SszParisEnvelope {
+pub fn osaka_newpayload_ssz(seed: u64, tx_count: usize) -> SszOsakaEnvelope {
     let f = build_raw_fields(seed, tx_count);
-    SszParisEnvelope {
-        execution_payload: raw_to_ssz_payload_paris(&f),
-    }
-}
-
-/// `POST /engine/v2/shanghai/payloads` body.
-#[allow(dead_code)]
-pub fn shanghai_newpayload_ssz(seed: u64, tx_count: usize) -> SszShanghaiEnvelope {
-    let f = build_raw_fields(seed, tx_count);
-    SszShanghaiEnvelope {
-        execution_payload: raw_to_ssz_payload_shanghai(&f),
-    }
-}
-
-/// `POST /engine/v2/cancun/payloads` body.
-#[allow(dead_code)]
-pub fn cancun_newpayload_ssz(seed: u64, tx_count: usize) -> SszCancunEnvelope {
-    let f = build_raw_fields(seed, tx_count);
-    SszCancunEnvelope {
-        execution_payload: raw_to_ssz_payload_cancun(&f),
-        parent_beacon_block_root: [0u8; 32],
-    }
-}
-
-/// `POST /engine/v2/prague/payloads` and `/osaka/payloads` body (same shape;
-/// Osaka re-exports the Prague envelope).
-#[allow(dead_code)]
-pub fn prague_newpayload_ssz(seed: u64, tx_count: usize) -> SszPragueEnvelope {
-    let f = build_raw_fields(seed, tx_count);
-    SszPragueEnvelope {
-        execution_payload: raw_to_ssz_payload_prague(&f),
+    SszOsakaEnvelope {
+        execution_payload: raw_to_ssz_payload_osaka(&f),
         parent_beacon_block_root: [0u8; 32],
         execution_requests: Vec::new().try_into().expect("empty requests fit"),
     }
@@ -375,11 +311,10 @@ pub fn blob_versioned_hashes(seed: u64, n: usize) -> Vec<H256> {
 /// `from_block` can't set correctly for us.
 fn json_payload_from_raw(
     f: &RawPayloadFields,
-    era: PayloadEra,
     bal: Option<BlockAccessList>,
     slot_number: Option<u64>,
 ) -> JsonExecutionPayload {
-    let payload = JsonExecutionPayload::from_block(raw_to_block(f, era, slot_number), bal);
+    let payload = JsonExecutionPayload::from_block(raw_to_block(f, slot_number), bal);
     let tx_json: Vec<serde_json::Value> = f
         .tx_bytes
         .iter()
@@ -394,76 +329,9 @@ fn json_payload_from_raw(
 }
 
 #[allow(dead_code)]
-fn raw_to_ssz_payload_paris(f: &RawPayloadFields) -> SszParisPayload {
+fn raw_to_ssz_payload_osaka(f: &RawPayloadFields) -> SszOsakaPayload {
     let p = ssz_payload_parts(f);
-    SszParisPayload {
-        parent_hash: f.parent_hash,
-        fee_recipient: Bytes20(f.fee_recipient),
-        state_root: f.state_root,
-        receipts_root: f.receipts_root,
-        logs_bloom: p.logs_bloom,
-        prev_randao: f.prev_randao,
-        block_number: f.block_number,
-        gas_limit: f.gas_limit,
-        gas_used: f.gas_used,
-        timestamp: f.timestamp,
-        extra_data: p.extra_data,
-        base_fee_per_gas: p.base_fee,
-        block_hash: [0u8; 32],
-        transactions: p.transactions,
-    }
-}
-
-#[allow(dead_code)]
-fn raw_to_ssz_payload_shanghai(f: &RawPayloadFields) -> SszShanghaiPayload {
-    let p = ssz_payload_parts(f);
-    SszShanghaiPayload {
-        parent_hash: f.parent_hash,
-        fee_recipient: Bytes20(f.fee_recipient),
-        state_root: f.state_root,
-        receipts_root: f.receipts_root,
-        logs_bloom: p.logs_bloom,
-        prev_randao: f.prev_randao,
-        block_number: f.block_number,
-        gas_limit: f.gas_limit,
-        gas_used: f.gas_used,
-        timestamp: f.timestamp,
-        extra_data: p.extra_data,
-        base_fee_per_gas: p.base_fee,
-        block_hash: [0u8; 32],
-        transactions: p.transactions,
-        withdrawals: p.withdrawals,
-    }
-}
-
-#[allow(dead_code)]
-fn raw_to_ssz_payload_cancun(f: &RawPayloadFields) -> SszCancunPayload {
-    let p = ssz_payload_parts(f);
-    SszCancunPayload {
-        parent_hash: f.parent_hash,
-        fee_recipient: Bytes20(f.fee_recipient),
-        state_root: f.state_root,
-        receipts_root: f.receipts_root,
-        logs_bloom: p.logs_bloom,
-        prev_randao: f.prev_randao,
-        block_number: f.block_number,
-        gas_limit: f.gas_limit,
-        gas_used: f.gas_used,
-        timestamp: f.timestamp,
-        extra_data: p.extra_data,
-        base_fee_per_gas: p.base_fee,
-        block_hash: [0u8; 32],
-        transactions: p.transactions,
-        withdrawals: p.withdrawals,
-        blob_gas_used: 0,
-        excess_blob_gas: 0,
-    }
-}
-
-#[allow(dead_code)]
-fn raw_to_ssz_payload_prague(f: &RawPayloadFields) -> SszPraguePayload {
-    let p = ssz_payload_parts(f);
-    SszPraguePayload {
+    SszOsakaPayload {
         parent_hash: f.parent_hash,
         fee_recipient: Bytes20(f.fee_recipient),
         state_root: f.state_root,
@@ -534,7 +402,7 @@ struct SszPayloadParts {
         { ethrex_rpc::engine_rest::types::common::MAX_TRANSACTIONS_PER_PAYLOAD },
     >,
     withdrawals: libssz_types::SszList<
-        ethrex_rpc::engine_rest::types::shanghai::Withdrawal,
+        ethrex_rpc::engine_rest::types::common::Withdrawal,
         { ethrex_rpc::engine_rest::types::common::MAX_WITHDRAWALS_PER_PAYLOAD },
     >,
 }
@@ -586,9 +454,8 @@ fn rand_bytes32(rng: &mut StdRng) -> [u8; 32] {
 // ── Blobs-bundle raw data (shared by the getPayload response fixtures) ───────
 
 /// Raw bundle bytes used by both the JSON and SSZ getPayload responses, so the
-/// two sides carry identical logical content. `proofs_per_blob` is 1 for the
-/// Cancun/Prague `BlobsBundleV1` and `CELLS_PER_EXT_BLOB` for the
-/// Osaka/Amsterdam `BlobsBundleV2`.
+/// two sides carry identical logical content. `proofs_per_blob` is
+/// `CELLS_PER_EXT_BLOB` for the Osaka/Amsterdam `BlobsBundleV2`.
 #[allow(dead_code)]
 struct RawBlobsBundle {
     /// Each `BYTES_PER_BLOB` long.
@@ -647,31 +514,6 @@ fn json_blobs_bundle(bundle: &RawBlobsBundle) -> BlobsBundle {
 }
 
 #[allow(dead_code)]
-fn ssz_blobs_bundle_v1(bundle: RawBlobsBundle) -> BlobsBundleV1 {
-    use ethrex_rpc::engine_rest::types::blobs::BYTES_PER_BLOB;
-    use libssz_types::SszVector;
-
-    let blobs: Vec<SszVector<u8, BYTES_PER_BLOB>> = bundle
-        .blobs
-        .into_iter()
-        .map(|b| b.try_into().expect("blob fits BYTES_PER_BLOB"))
-        .collect();
-    BlobsBundleV1 {
-        commitments: bundle
-            .commitments
-            .try_into()
-            .expect("commitments fit MAX_BLOB_COMMITMENTS_PER_BLOCK"),
-        proofs: bundle
-            .proofs
-            .try_into()
-            .expect("proofs fit MAX_BLOB_COMMITMENTS_PER_BLOCK"),
-        blobs: blobs
-            .try_into()
-            .expect("blobs fit MAX_BLOB_COMMITMENTS_PER_BLOCK"),
-    }
-}
-
-#[allow(dead_code)]
 fn ssz_blobs_bundle_v2(bundle: RawBlobsBundle) -> BlobsBundleV2 {
     use ethrex_rpc::engine_rest::types::blobs::BYTES_PER_BLOB;
     use libssz_types::SszVector;
@@ -698,115 +540,6 @@ fn ssz_blobs_bundle_v2(bundle: RawBlobsBundle) -> BlobsBundleV2 {
 
 // ── getPayload response fixtures ─────────────────────────────────────────────
 
-/// JSON-side `engine_getPayloadV1` response: a bare ExecutionPayload (the
-/// JSON V1 result carries no block value — the SSZ `BuiltPayloadParis` does;
-/// this asymmetry is faithful to the wire).
-#[allow(dead_code)]
-pub fn getpayload_response_json_paris(seed: u64, tx_count: usize) -> JsonExecutionPayload {
-    payload_json(seed, tx_count, PayloadEra::Paris)
-}
-
-/// SSZ-side `GET /paris/payloads/{id}` response.
-#[allow(dead_code)]
-pub fn getpayload_response_ssz_paris(seed: u64, tx_count: usize) -> BuiltPayloadParis {
-    let f = build_raw_fields(seed, tx_count);
-    BuiltPayloadParis {
-        payload: raw_to_ssz_payload_paris(&f),
-        block_value: block_value_le(),
-    }
-}
-
-/// JSON-side `engine_getPayloadV2` response: payload + block value (the
-/// implementation serializes the full response struct with null optionals).
-#[allow(dead_code)]
-pub fn getpayload_response_json_shanghai(seed: u64, tx_count: usize) -> ExecutionPayloadResponse {
-    let f = build_raw_fields(seed, tx_count);
-    ExecutionPayloadResponse {
-        execution_payload: json_payload_from_raw(&f, PayloadEra::Shanghai, None, None),
-        block_value: U256::from(BLOCK_VALUE_WEI),
-        blobs_bundle: None,
-        should_override_builder: None,
-        execution_requests: None,
-    }
-}
-
-/// SSZ-side `GET /shanghai/payloads/{id}` response.
-#[allow(dead_code)]
-pub fn getpayload_response_ssz_shanghai(seed: u64, tx_count: usize) -> BuiltPayloadShanghai {
-    let f = build_raw_fields(seed, tx_count);
-    BuiltPayloadShanghai {
-        payload: raw_to_ssz_payload_shanghai(&f),
-        block_value: block_value_le(),
-    }
-}
-
-/// JSON-side `engine_getPayloadV3` response: + `BlobsBundleV1` (1 proof/blob).
-#[allow(dead_code)]
-pub fn getpayload_response_json_cancun(
-    seed: u64,
-    tx_count: usize,
-    blob_count: usize,
-) -> ExecutionPayloadResponse {
-    let f = build_raw_fields(seed, tx_count);
-    ExecutionPayloadResponse {
-        execution_payload: json_payload_from_raw(&f, PayloadEra::Cancun, None, None),
-        block_value: U256::from(BLOCK_VALUE_WEI),
-        blobs_bundle: Some(json_blobs_bundle(&build_raw_bundle(seed, blob_count, 1))),
-        should_override_builder: Some(false),
-        execution_requests: None,
-    }
-}
-
-/// SSZ-side `GET /cancun/payloads/{id}` response.
-#[allow(dead_code)]
-pub fn getpayload_response_ssz_cancun(
-    seed: u64,
-    tx_count: usize,
-    blob_count: usize,
-) -> BuiltPayloadCancun {
-    let f = build_raw_fields(seed, tx_count);
-    BuiltPayloadCancun {
-        payload: raw_to_ssz_payload_cancun(&f),
-        block_value: block_value_le(),
-        blobs_bundle: ssz_blobs_bundle_v1(build_raw_bundle(seed, blob_count, 1)),
-        should_override_builder: false,
-    }
-}
-
-/// JSON-side `engine_getPayloadV4` response: V3 + execution requests.
-#[allow(dead_code)]
-pub fn getpayload_response_json_prague(
-    seed: u64,
-    tx_count: usize,
-    blob_count: usize,
-) -> ExecutionPayloadResponse {
-    let f = build_raw_fields(seed, tx_count);
-    ExecutionPayloadResponse {
-        execution_payload: json_payload_from_raw(&f, PayloadEra::Cancun, None, None),
-        block_value: U256::from(BLOCK_VALUE_WEI),
-        blobs_bundle: Some(json_blobs_bundle(&build_raw_bundle(seed, blob_count, 1))),
-        should_override_builder: Some(false),
-        execution_requests: Some(requests_json(&build_raw_requests(seed))),
-    }
-}
-
-/// SSZ-side `GET /prague/payloads/{id}` response.
-#[allow(dead_code)]
-pub fn getpayload_response_ssz_prague(
-    seed: u64,
-    tx_count: usize,
-    blob_count: usize,
-) -> BuiltPayloadPrague {
-    let f = build_raw_fields(seed, tx_count);
-    BuiltPayloadPrague {
-        payload: raw_to_ssz_payload_prague(&f),
-        block_value: block_value_le(),
-        blobs_bundle: ssz_blobs_bundle_v1(build_raw_bundle(seed, blob_count, 1)),
-        execution_requests: requests_ssz(&build_raw_requests(seed)),
-        should_override_builder: false,
-    }
-}
-
 /// JSON-side `engine_getPayloadV5` (Osaka) response: cell-proof bundle.
 #[allow(dead_code)]
 pub fn getpayload_response_json_osaka(
@@ -817,7 +550,7 @@ pub fn getpayload_response_json_osaka(
     use ethrex_rpc::engine_rest::types::blobs::CELLS_PER_EXT_BLOB;
     let f = build_raw_fields(seed, tx_count);
     ExecutionPayloadResponse {
-        execution_payload: json_payload_from_raw(&f, PayloadEra::Cancun, None, None),
+        execution_payload: json_payload_from_raw(&f, None, None),
         block_value: U256::from(BLOCK_VALUE_WEI),
         blobs_bundle: Some(json_blobs_bundle(&build_raw_bundle(
             seed,
@@ -839,7 +572,7 @@ pub fn getpayload_response_ssz_osaka(
     use ethrex_rpc::engine_rest::types::blobs::CELLS_PER_EXT_BLOB;
     let f = build_raw_fields(seed, tx_count);
     BuiltPayloadOsaka {
-        payload: raw_to_ssz_payload_prague(&f),
+        payload: raw_to_ssz_payload_osaka(&f),
         block_value: block_value_le(),
         blobs_bundle: ssz_blobs_bundle_v2(build_raw_bundle(seed, blob_count, CELLS_PER_EXT_BLOB)),
         execution_requests: requests_ssz(&build_raw_requests(seed)),
@@ -860,12 +593,7 @@ pub fn getpayload_response_json_amsterdam(
     let f = build_raw_fields(seed, tx_count);
     let bal = build_synthetic_bal(seed, bal_accounts);
     ExecutionPayloadResponse {
-        execution_payload: json_payload_from_raw(
-            &f,
-            PayloadEra::Cancun,
-            Some(bal),
-            Some(DEFAULT_SLOT_NUMBER),
-        ),
+        execution_payload: json_payload_from_raw(&f, Some(bal), Some(DEFAULT_SLOT_NUMBER)),
         block_value: U256::from(BLOCK_VALUE_WEI),
         blobs_bundle: Some(json_blobs_bundle(&build_raw_bundle(
             seed,
@@ -908,8 +636,8 @@ fn block_value_le() -> [u8; 32] {
 
 /// JSON-side bodies response (`…BodiesByRangeV1`):
 /// `Vec<Option<ExecutionPayloadBody>>` with `tx_per_body` random txs each.
-/// `with_withdrawals` distinguishes the Paris era (`null`) from Shanghai+
-/// (empty list).
+/// `with_withdrawals` controls whether withdrawals are an empty list (Osaka)
+/// or `null`.
 #[allow(dead_code)]
 pub fn bodies_range_json(
     seed: u64,
@@ -928,49 +656,25 @@ pub fn bodies_range_json(
         .collect()
 }
 
-/// SSZ-side `GET /paris/bodies` response.
+/// SSZ-side bodies response for the osaka paths.
 #[allow(dead_code)]
-pub fn bodies_range_ssz_paris(
+pub fn bodies_range_ssz_osaka(
     seed: u64,
     n: usize,
     tx_per_body: usize,
-) -> ethrex_rpc::engine_rest::types::bodies::BodiesResponseParis {
-    use ethrex_rpc::engine_rest::types::bodies::{BodyEntryParis, BodyParis};
+) -> ethrex_rpc::engine_rest::types::bodies::BodiesResponseOsaka {
+    use ethrex_rpc::engine_rest::types::bodies::{BodyEntryOsaka, BodyOsaka};
 
     let mut rng = StdRng::seed_from_u64(seed);
-    let entries_vec: Vec<BodyEntryParis> = (0..n)
+    let entries_vec: Vec<BodyEntryOsaka> = (0..n)
         .map(|_| {
-            BodyEntryParis::available(BodyParis {
-                transactions: body_txs_ssz(&mut rng, tx_per_body),
-            })
-        })
-        .collect();
-    ethrex_rpc::engine_rest::types::bodies::BodiesResponseParis {
-        entries: entries_vec
-            .try_into()
-            .expect("bodies fit MAX_BODIES_PER_REQUEST"),
-    }
-}
-
-/// SSZ-side bodies response for the shanghai → osaka paths (Shanghai shape).
-#[allow(dead_code)]
-pub fn bodies_range_ssz_shanghai(
-    seed: u64,
-    n: usize,
-    tx_per_body: usize,
-) -> ethrex_rpc::engine_rest::types::bodies::BodiesResponseShanghai {
-    use ethrex_rpc::engine_rest::types::bodies::{BodyEntryShanghai, BodyShanghai};
-
-    let mut rng = StdRng::seed_from_u64(seed);
-    let entries_vec: Vec<BodyEntryShanghai> = (0..n)
-        .map(|_| {
-            BodyEntryShanghai::available(BodyShanghai {
+            BodyEntryOsaka::available(BodyOsaka {
                 transactions: body_txs_ssz(&mut rng, tx_per_body),
                 withdrawals: Vec::new().try_into().expect("empty withdrawals fits"),
             })
         })
         .collect();
-    ethrex_rpc::engine_rest::types::bodies::BodiesResponseShanghai {
+    ethrex_rpc::engine_rest::types::bodies::BodiesResponseOsaka {
         entries: entries_vec
             .try_into()
             .expect("bodies fit MAX_BODIES_PER_REQUEST"),
@@ -1075,78 +779,6 @@ fn body_txs_ssz(
 }
 
 // ── Blobs response fixtures ──────────────────────────────────────────────────
-
-/// JSON-side `engine_getBlobsV1` hit-path response: blob + single proof.
-#[allow(dead_code)]
-pub fn blobs_v1_response_json(
-    seed: u64,
-    n: usize,
-) -> Vec<Option<ethrex_rpc::engine::blobs::BlobAndProofV1>> {
-    use ethrex_rpc::engine_rest::types::blobs::{BYTES_PER_BLOB, BYTES_PER_PROOF};
-
-    let mut rng = StdRng::seed_from_u64(seed);
-    (0..n)
-        .map(|_| {
-            let mut blob = [0u8; BYTES_PER_BLOB];
-            rng.fill(&mut blob[..]);
-            let mut proof = [0u8; BYTES_PER_PROOF];
-            rng.fill(&mut proof[..]);
-            Some(ethrex_rpc::engine::blobs::BlobAndProofV1 { blob, proof })
-        })
-        .collect()
-}
-
-/// SSZ-side `/blobs/v1` hit-path response.
-#[allow(dead_code)]
-pub fn blobs_v1_response_ssz(
-    seed: u64,
-    n: usize,
-) -> ethrex_rpc::engine_rest::types::blobs::BlobsV1Response {
-    use ethrex_rpc::engine_rest::types::blobs::{
-        BYTES_PER_BLOB, BYTES_PER_PROOF, BlobAndProofV1 as SszBlobAndProofV1, BlobV1Entry,
-    };
-    use libssz_types::SszVector;
-
-    let mut rng = StdRng::seed_from_u64(seed);
-    let entries: Vec<BlobV1Entry> = (0..n)
-        .map(|_| {
-            let mut blob = vec![0u8; BYTES_PER_BLOB];
-            rng.fill(&mut blob[..]);
-            let mut proof = [0u8; BYTES_PER_PROOF];
-            rng.fill(&mut proof[..]);
-            let blob_ssz: SszVector<u8, BYTES_PER_BLOB> =
-                blob.try_into().expect("blob fits BYTES_PER_BLOB");
-            BlobV1Entry::available(SszBlobAndProofV1 {
-                blob: blob_ssz,
-                proof,
-            })
-        })
-        .collect();
-    ethrex_rpc::engine_rest::types::blobs::BlobsV1Response {
-        entries: entries.try_into().expect("n <= MAX_BLOBS_REQUEST"),
-    }
-}
-
-/// SSZ-side `/blobs/v1` all-miss response: zero-padded full-size entries.
-#[allow(dead_code)]
-pub fn blobs_v1_response_ssz_allmiss(
-    n: usize,
-) -> ethrex_rpc::engine_rest::types::blobs::BlobsV1Response {
-    use ethrex_rpc::engine_rest::types::blobs::BlobV1Entry;
-
-    let entries: Vec<BlobV1Entry> = (0..n).map(|_| BlobV1Entry::unavailable()).collect();
-    ethrex_rpc::engine_rest::types::blobs::BlobsV1Response {
-        entries: entries.try_into().expect("n <= MAX_BLOBS_REQUEST"),
-    }
-}
-
-/// JSON-side v1 all-miss response: `n` nulls.
-#[allow(dead_code)]
-pub fn blobs_v1_response_json_allmiss(
-    n: usize,
-) -> Vec<Option<ethrex_rpc::engine::blobs::BlobAndProofV1>> {
-    (0..n).map(|_| None).collect()
-}
 
 /// JSON-side blobs response (`engine_getBlobsV2`/`V3` hit path):
 /// `Vec<Option<BlobAndProofV2>>`, each entry a blob + `CELLS_PER_EXT_BLOB`

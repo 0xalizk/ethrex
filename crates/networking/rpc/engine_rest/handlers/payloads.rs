@@ -13,9 +13,7 @@ use ethrex_common::types::{Block, Fork};
 use ethrex_rlp::encode::RLPEncode;
 use libssz_types::{SszList, SszVector};
 
-use crate::engine::payload::{
-    handle_new_payload_v1_v2, handle_new_payload_v3, handle_new_payload_v4,
-};
+use crate::engine::payload::{handle_new_payload_v3, handle_new_payload_v4};
 use crate::engine_rest::error::ProblemJson;
 use crate::engine_rest::extractors::{decode_ssz, is_length_limit_error};
 use crate::engine_rest::fork_path::{ForkPath, parse_fork_segment};
@@ -23,14 +21,13 @@ use crate::engine_rest::handlers::helpers::check_content_type;
 use crate::engine_rest::responses::SszBody;
 use crate::engine_rest::types::blobs::BYTES_PER_BLOB;
 use crate::engine_rest::types::built_payload::{
-    BlobsBundleV1, BlobsBundleV2, BuiltPayloadAmsterdam, BuiltPayloadCancun, BuiltPayloadOsaka,
-    BuiltPayloadParis, BuiltPayloadPrague, BuiltPayloadShanghai, MAX_BLOB_COMMITMENTS_PER_BLOCK,
+    BlobsBundleV2, BuiltPayloadAmsterdam, BuiltPayloadOsaka, MAX_BLOB_COMMITMENTS_PER_BLOCK,
 };
 use crate::engine_rest::types::common::{
-    Bytes20, PayloadId, PayloadStatus as SszPayloadStatus, PayloadStatusCode,
+    Bytes20, PayloadId, PayloadStatus as SszPayloadStatus, PayloadStatusCode, Withdrawal,
 };
 use crate::engine_rest::types::conversions::{DecodedNewPayload, EngineCall, IntoEngineCall};
-use crate::engine_rest::types::{amsterdam, cancun, paris, prague, shanghai};
+use crate::engine_rest::types::{amsterdam, osaka};
 use crate::rpc::RpcApiContext;
 use crate::types::payload::PayloadValidationStatus;
 
@@ -57,20 +54,13 @@ pub async fn submit_payload(
         }
     };
     match fork {
-        Fork::Paris => decode_and_submit::<paris::ExecutionPayloadEnvelope>(body, ctx).await,
-        Fork::Shanghai => decode_and_submit::<shanghai::ExecutionPayloadEnvelope>(body, ctx).await,
-        Fork::Cancun => decode_and_submit::<cancun::ExecutionPayloadEnvelope>(body, ctx).await,
-        Fork::Prague => decode_and_submit::<prague::ExecutionPayloadEnvelope>(body, ctx).await,
-        Fork::Osaka => {
-            // Osaka re-exports Prague's envelope (see types/osaka.rs); same shape.
-            decode_and_submit::<prague::ExecutionPayloadEnvelope>(body, ctx).await
-        }
+        Fork::Osaka => decode_and_submit::<osaka::ExecutionPayloadEnvelope>(body, ctx).await,
         Fork::Amsterdam => {
             decode_and_submit::<amsterdam::ExecutionPayloadEnvelope>(body, ctx).await
         }
         // Unreachable: ForkPath's parse_fork_segment rejects all non-spec forks
         // with 400 before the handler runs.
-        _ => unreachable!("ForkPath extractor restricts to the 6 spec forks"),
+        _ => unreachable!("ForkPath extractor restricts to the osaka/amsterdam forks"),
     }
 }
 
@@ -124,17 +114,14 @@ where
         }
     }
 
-    // 3b. Fork-boundary check (mirror JSON-RPC NewPayloadV3/V4/V5 UnsupportedFork,
+    // 3b. Fork-boundary check (mirror JSON-RPC NewPayloadV4/V5 UnsupportedFork,
     //     engine/payload.rs). The fork is pinned by the URL, so a payload whose
     //     timestamp belongs to a different fork era is misrouted; reject it with
     //     400 instead of letting it fall through to a block-hash-mismatch INVALID.
-    //     V4 covers Prague+Osaka (a range), so it can't use the single-fork
-    //     `validate_fork` helper the way V3 (Cancun-only) effectively does here.
+    //     V4 accepts the Osaka era (prague-activated, not yet amsterdam).
     let chain_config = ctx.storage.get_chain_config();
     let ts = block.header.timestamp;
     let misrouted = match &call {
-        EngineCall::V1V2 => false,
-        EngineCall::V3 => chain_config.get_fork(ts) != Fork::Cancun,
         EngineCall::V4 => {
             chain_config.is_amsterdam_activated(ts) || !chain_config.is_prague_activated(ts)
         }
@@ -160,13 +147,7 @@ where
     //    surfaces as INVALID. The JSON-RPC path keeps the explicit cross-check
     //    (it still receives the param); only this transport drops it.
     let result = match call {
-        EngineCall::V1V2 => {
-            handle_new_payload_v1_v2(expected_block_hash, block, ctx, None, false).await
-        }
-        EngineCall::V3 => {
-            handle_new_payload_v3(expected_block_hash, ctx, block, None, None, false).await
-        }
-        // Prague (V4) reuses handle_new_payload_v3 — matches the JSON-RPC
+        // Osaka (V4) reuses handle_new_payload_v3 — matches the JSON-RPC
         // NewPayloadV4Request::handle behavior in engine/payload.rs.
         EngineCall::V4 => {
             handle_new_payload_v3(expected_block_hash, ctx, block, None, None, false).await
@@ -250,13 +231,9 @@ pub async fn get_payload(
     let built_ts = result.payload.header.timestamp;
     let cc = ctx.storage.get_chain_config();
     let fork_ok = match fork {
-        Fork::Paris => !cc.is_shanghai_activated(built_ts),
-        Fork::Shanghai => cc.is_shanghai_activated(built_ts) && !cc.is_cancun_activated(built_ts),
-        Fork::Cancun => cc.is_cancun_activated(built_ts) && !cc.is_prague_activated(built_ts),
-        Fork::Prague => cc.is_prague_activated(built_ts) && !cc.is_osaka_activated(built_ts),
         Fork::Osaka => cc.is_osaka_activated(built_ts) && !cc.is_amsterdam_activated(built_ts),
         Fork::Amsterdam => cc.is_amsterdam_activated(built_ts),
-        // parse_fork_segment restricts to the 6 spec forks.
+        // parse_fork_segment restricts to the osaka/amsterdam forks.
         _ => false,
     };
     if !fork_ok {
@@ -275,45 +252,9 @@ pub async fn get_payload(
     let block = &result.payload;
     let block_value = u256_to_le_bytes(result.block_value);
     let built: Result<Response, ProblemJson> = match fork {
-        Fork::Paris => paris_envelope_from_block(block).map(|env| {
-            SszBody(BuiltPayloadParis {
-                payload: env.execution_payload,
-                block_value,
-            })
-            .into_response()
-        }),
-        Fork::Shanghai => shanghai_envelope_from_block(block).map(|env| {
-            SszBody(BuiltPayloadShanghai {
-                payload: env.execution_payload,
-                block_value,
-            })
-            .into_response()
-        }),
-        Fork::Cancun => (|| -> Result<Response, ProblemJson> {
-            let payload = cancun_envelope_from_block(block)?.execution_payload;
-            Ok(SszBody(BuiltPayloadCancun {
-                payload,
-                block_value,
-                blobs_bundle: blobs_bundle_v1(&result.blobs_bundle)?,
-                should_override_builder: false,
-            })
-            .into_response())
-        })(),
-        Fork::Prague => (|| -> Result<Response, ProblemJson> {
-            Ok(SszBody(BuiltPayloadPrague {
-                payload: prague_payload_from_block(block)?,
-                block_value,
-                blobs_bundle: blobs_bundle_v1(&result.blobs_bundle)?,
-                execution_requests: ssz_execution_requests(&result.requests)?,
-                should_override_builder: false,
-            })
-            .into_response())
-        })(),
         Fork::Osaka => (|| -> Result<Response, ProblemJson> {
-            // Osaka payload is structurally identical to Prague; the difference
-            // is the cell-proof BlobsBundleV2.
             Ok(SszBody(BuiltPayloadOsaka {
-                payload: prague_payload_from_block(block)?,
+                payload: osaka_payload_from_block(block)?,
                 block_value,
                 blobs_bundle: blobs_bundle_v2(&result.blobs_bundle)?,
                 execution_requests: ssz_execution_requests(&result.requests)?,
@@ -370,21 +311,6 @@ fn ssz_blobs(
         .map_err(|_| ProblemJson::internal("blobs exceed MAX_BLOB_COMMITMENTS_PER_BLOCK"))
 }
 
-/// `BlobsBundleV1` — one whole-blob proof per blob (Cancun/Prague).
-fn blobs_bundle_v1(b: &BlobsBundle) -> Result<BlobsBundleV1, ProblemJson> {
-    Ok(BlobsBundleV1 {
-        commitments: b.commitments.clone().try_into().map_err(|_| {
-            ProblemJson::internal("commitments exceed MAX_BLOB_COMMITMENTS_PER_BLOCK")
-        })?,
-        proofs: b
-            .proofs
-            .clone()
-            .try_into()
-            .map_err(|_| ProblemJson::internal("proofs exceed MAX_BLOB_COMMITMENTS_PER_BLOCK"))?,
-        blobs: ssz_blobs(&b.blobs)?,
-    })
-}
-
 /// `BlobsBundleV2` — cell proofs (Osaka/Amsterdam).
 fn blobs_bundle_v2(b: &BlobsBundle) -> Result<BlobsBundleV2, ProblemJson> {
     Ok(BlobsBundleV2 {
@@ -436,19 +362,16 @@ macro_rules! ssz_txs {
 fn ssz_withdrawals(
     block: &Block,
 ) -> Result<
-    SszList<
-        shanghai::Withdrawal,
-        { crate::engine_rest::types::common::MAX_WITHDRAWALS_PER_PAYLOAD },
-    >,
+    SszList<Withdrawal, { crate::engine_rest::types::common::MAX_WITHDRAWALS_PER_PAYLOAD }>,
     ProblemJson,
 > {
-    let ws: Vec<shanghai::Withdrawal> = block
+    let ws: Vec<Withdrawal> = block
         .body
         .withdrawals
         .as_deref()
         .unwrap_or(&[])
         .iter()
-        .map(|w| shanghai::Withdrawal {
+        .map(|w| Withdrawal {
             index: w.index,
             validator_index: w.validator_index,
             address: Bytes20(w.address.0),
@@ -459,9 +382,7 @@ fn ssz_withdrawals(
         .map_err(|_| ProblemJson::internal("withdrawal count exceeds MAX_WITHDRAWALS_PER_PAYLOAD"))
 }
 
-fn paris_envelope_from_block(
-    block: &Block,
-) -> Result<paris::ExecutionPayloadEnvelope, ProblemJson> {
+fn osaka_payload_from_block(block: &Block) -> Result<osaka::ExecutionPayload, ProblemJson> {
     use crate::engine_rest::types::common::{
         MAX_BYTES_PER_TRANSACTION, MAX_TRANSACTIONS_PER_PAYLOAD,
     };
@@ -473,133 +394,7 @@ fn paris_envelope_from_block(
         MAX_TRANSACTIONS_PER_PAYLOAD
     )?;
 
-    Ok(paris::ExecutionPayloadEnvelope {
-        execution_payload: paris::ExecutionPayload {
-            parent_hash: h.parent_hash.0,
-            fee_recipient: Bytes20(h.coinbase.0),
-            state_root: h.state_root.0,
-            receipts_root: h.receipts_root.0,
-            logs_bloom: h
-                .logs_bloom
-                .0
-                .to_vec()
-                .try_into()
-                .expect("logs_bloom is exactly 256 bytes"),
-            prev_randao: h.prev_randao.0,
-            block_number: h.number,
-            gas_limit: h.gas_limit,
-            gas_used: h.gas_used,
-            timestamp: h.timestamp,
-            extra_data: h.extra_data.to_vec().try_into().map_err(|_| {
-                ProblemJson::internal("stored extra_data exceeds MAX_EXTRA_DATA_BYTES")
-            })?,
-            base_fee_per_gas: u64_to_ssz_base_fee(h.base_fee_per_gas.unwrap_or(0)),
-            block_hash: block.hash().0,
-            transactions: txs,
-        },
-    })
-}
-
-fn shanghai_envelope_from_block(
-    block: &Block,
-) -> Result<shanghai::ExecutionPayloadEnvelope, ProblemJson> {
-    use crate::engine_rest::types::common::{
-        MAX_BYTES_PER_TRANSACTION, MAX_TRANSACTIONS_PER_PAYLOAD,
-    };
-
-    let h = &block.header;
-    let txs: SszList<SszList<u8, MAX_BYTES_PER_TRANSACTION>, MAX_TRANSACTIONS_PER_PAYLOAD> = ssz_txs!(
-        &block.body.transactions,
-        MAX_BYTES_PER_TRANSACTION,
-        MAX_TRANSACTIONS_PER_PAYLOAD
-    )?;
-
-    Ok(shanghai::ExecutionPayloadEnvelope {
-        execution_payload: shanghai::ExecutionPayload {
-            parent_hash: h.parent_hash.0,
-            fee_recipient: Bytes20(h.coinbase.0),
-            state_root: h.state_root.0,
-            receipts_root: h.receipts_root.0,
-            logs_bloom: h
-                .logs_bloom
-                .0
-                .to_vec()
-                .try_into()
-                .expect("logs_bloom is exactly 256 bytes"),
-            prev_randao: h.prev_randao.0,
-            block_number: h.number,
-            gas_limit: h.gas_limit,
-            gas_used: h.gas_used,
-            timestamp: h.timestamp,
-            extra_data: h.extra_data.to_vec().try_into().map_err(|_| {
-                ProblemJson::internal("stored extra_data exceeds MAX_EXTRA_DATA_BYTES")
-            })?,
-            base_fee_per_gas: u64_to_ssz_base_fee(h.base_fee_per_gas.unwrap_or(0)),
-            block_hash: block.hash().0,
-            transactions: txs,
-            withdrawals: ssz_withdrawals(block)?,
-        },
-    })
-}
-
-fn cancun_envelope_from_block(
-    block: &Block,
-) -> Result<cancun::ExecutionPayloadEnvelope, ProblemJson> {
-    use crate::engine_rest::types::common::{
-        MAX_BYTES_PER_TRANSACTION, MAX_TRANSACTIONS_PER_PAYLOAD,
-    };
-
-    let h = &block.header;
-    let txs: SszList<SszList<u8, MAX_BYTES_PER_TRANSACTION>, MAX_TRANSACTIONS_PER_PAYLOAD> = ssz_txs!(
-        &block.body.transactions,
-        MAX_BYTES_PER_TRANSACTION,
-        MAX_TRANSACTIONS_PER_PAYLOAD
-    )?;
-
-    Ok(cancun::ExecutionPayloadEnvelope {
-        execution_payload: cancun::ExecutionPayload {
-            parent_hash: h.parent_hash.0,
-            fee_recipient: Bytes20(h.coinbase.0),
-            state_root: h.state_root.0,
-            receipts_root: h.receipts_root.0,
-            logs_bloom: h
-                .logs_bloom
-                .0
-                .to_vec()
-                .try_into()
-                .expect("logs_bloom is exactly 256 bytes"),
-            prev_randao: h.prev_randao.0,
-            block_number: h.number,
-            gas_limit: h.gas_limit,
-            gas_used: h.gas_used,
-            timestamp: h.timestamp,
-            extra_data: h.extra_data.to_vec().try_into().map_err(|_| {
-                ProblemJson::internal("stored extra_data exceeds MAX_EXTRA_DATA_BYTES")
-            })?,
-            base_fee_per_gas: u64_to_ssz_base_fee(h.base_fee_per_gas.unwrap_or(0)),
-            block_hash: block.hash().0,
-            transactions: txs,
-            withdrawals: ssz_withdrawals(block)?,
-            blob_gas_used: h.blob_gas_used.unwrap_or(0),
-            excess_blob_gas: h.excess_blob_gas.unwrap_or(0),
-        },
-        parent_beacon_block_root: h.parent_beacon_block_root.unwrap_or_default().0,
-    })
-}
-
-fn prague_payload_from_block(block: &Block) -> Result<prague::ExecutionPayload, ProblemJson> {
-    use crate::engine_rest::types::common::{
-        MAX_BYTES_PER_TRANSACTION, MAX_TRANSACTIONS_PER_PAYLOAD,
-    };
-
-    let h = &block.header;
-    let txs: SszList<SszList<u8, MAX_BYTES_PER_TRANSACTION>, MAX_TRANSACTIONS_PER_PAYLOAD> = ssz_txs!(
-        &block.body.transactions,
-        MAX_BYTES_PER_TRANSACTION,
-        MAX_TRANSACTIONS_PER_PAYLOAD
-    )?;
-
-    Ok(prague::ExecutionPayload {
+    Ok(osaka::ExecutionPayload {
         parent_hash: h.parent_hash.0,
         fee_recipient: Bytes20(h.coinbase.0),
         state_root: h.state_root.0,

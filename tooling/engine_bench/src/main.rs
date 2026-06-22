@@ -24,8 +24,8 @@ use reqwest::Client;
 use std::time::Duration;
 use workloads::{IterationRecord, SYNTHETIC_PAYLOAD_ID, WorkloadContext};
 
-/// Blobs endpoint versions exercised per fork.
-const BLOBS_VERSIONS: [u8; 3] = [1, 2, 3];
+/// Blobs endpoint versions exercised per fork (Osaka onward; v1 was pre-Osaka).
+const BLOBS_VERSIONS: [u8; 2] = [2, 3];
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {

@@ -1,4 +1,4 @@
-//! Amsterdam-shape SSZ types — Prague plus block_access_list and slot_number
+//! Amsterdam-shape SSZ types — Osaka plus block_access_list and slot_number
 //! (payload), and slot_number + target_gas_limit (payload_attributes).
 
 use libssz_derive::{HashTreeRoot, SszDecode, SszEncode};
@@ -7,11 +7,10 @@ use libssz_types::SszList;
 use super::common::{
     Bytes20, LogsBloom, MAX_BLOCK_ACCESS_LIST_BYTES, MAX_BYTES_PER_TRANSACTION,
     MAX_EXECUTION_REQUESTS_PER_PAYLOAD, MAX_EXTRA_DATA_BYTES, MAX_REQUEST_BYTES,
-    MAX_TRANSACTIONS_PER_PAYLOAD, MAX_WITHDRAWALS_PER_PAYLOAD,
+    MAX_TRANSACTIONS_PER_PAYLOAD, MAX_WITHDRAWALS_PER_PAYLOAD, Withdrawal,
 };
-use super::shanghai::Withdrawal;
 
-/// Amsterdam `ExecutionPayload`: Prague fields + `block_access_list` + `slot_number`.
+/// Amsterdam `ExecutionPayload`: Osaka fields + `block_access_list` + `slot_number`.
 #[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
 pub struct ExecutionPayload {
     pub parent_hash: [u8; 32],
@@ -35,7 +34,7 @@ pub struct ExecutionPayload {
     pub slot_number: u64,
 }
 
-/// Amsterdam envelope: Prague envelope shape with the new payload variant.
+/// Amsterdam envelope: Osaka envelope shape with the new payload variant.
 #[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
 pub struct ExecutionPayloadEnvelope {
     pub execution_payload: ExecutionPayload,
@@ -44,7 +43,7 @@ pub struct ExecutionPayloadEnvelope {
         SszList<SszList<u8, MAX_REQUEST_BYTES>, MAX_EXECUTION_REQUESTS_PER_PAYLOAD>,
 }
 
-/// Amsterdam payload attributes: Cancun fields + `slot_number` + `target_gas_limit`
+/// Amsterdam payload attributes: Osaka fields + `slot_number` + `target_gas_limit`
 /// (execution-apis #793, `PayloadAttributesAmsterdam`). `target_gas_limit` is
 /// decoded for spec compliance; the value is ignored by ethrex's payload builder
 /// until gas-limit targeting lands. `custody_columns` is NOT part of these

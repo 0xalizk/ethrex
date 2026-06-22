@@ -103,32 +103,19 @@ pub enum Workload {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ForkArg {
-    Paris,
-    Shanghai,
-    Cancun,
-    Prague,
     Osaka,
     Amsterdam,
 }
 
 impl ForkArg {
-    /// Every fork era, in activation order — the default-mode sweep.
-    pub const ALL: [ForkArg; 6] = [
-        ForkArg::Paris,
-        ForkArg::Shanghai,
-        ForkArg::Cancun,
-        ForkArg::Prague,
-        ForkArg::Osaka,
-        ForkArg::Amsterdam,
-    ];
+    /// Every fork era served by the REST/SSZ API, in activation order — the
+    /// default-mode sweep. Pre-Fusaka forks (Paris..Prague) are no longer
+    /// supported.
+    pub const ALL: [ForkArg; 2] = [ForkArg::Osaka, ForkArg::Amsterdam];
 
     /// URL path segment for the REST/SSZ API (also used as the display name).
     pub fn path(self) -> &'static str {
         match self {
-            ForkArg::Paris => "paris",
-            ForkArg::Shanghai => "shanghai",
-            ForkArg::Cancun => "cancun",
-            ForkArg::Prague => "prague",
             ForkArg::Osaka => "osaka",
             ForkArg::Amsterdam => "amsterdam",
         }

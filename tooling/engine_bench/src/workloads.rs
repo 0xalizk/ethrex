@@ -127,23 +127,10 @@ async fn run_newpayload_json(
     // The synthetic block hash is invalid on purpose: the server fully decodes
     // the payload, then rejects it, isolating transport + decode from
     // execution. Requests param (V4/V5) is empty, matching the SSZ envelopes.
-    use fixtures::PayloadEra;
     let payload = match ctx.fork {
-        ForkArg::Paris => fixtures::payload_json(
-            fixtures::DEFAULT_SEED,
-            fixtures::DEFAULT_TX_COUNT,
-            PayloadEra::Paris,
-        ),
-        ForkArg::Shanghai => fixtures::payload_json(
-            fixtures::DEFAULT_SEED,
-            fixtures::DEFAULT_TX_COUNT,
-            PayloadEra::Shanghai,
-        ),
-        ForkArg::Cancun | ForkArg::Prague | ForkArg::Osaka => fixtures::payload_json(
-            fixtures::DEFAULT_SEED,
-            fixtures::DEFAULT_TX_COUNT,
-            PayloadEra::Cancun,
-        ),
+        ForkArg::Osaka => {
+            fixtures::payload_json(fixtures::DEFAULT_SEED, fixtures::DEFAULT_TX_COUNT)
+        }
         ForkArg::Amsterdam => fixtures::amsterdam_payload_json(
             fixtures::DEFAULT_SEED,
             fixtures::DEFAULT_TX_COUNT,
@@ -151,26 +138,10 @@ async fn run_newpayload_json(
         ),
     };
     let t0 = Instant::now();
-    // Param arity follows the spec: V1/V2 take [payload], V3 adds versioned
-    // hashes + beacon root, V4/V5 add execution requests.
+    // Param arity follows the spec: V4 adds execution requests on top of V3's
+    // versioned hashes + beacon root, V5 keeps the same arity for Amsterdam.
     let resp = match ctx.fork {
-        ForkArg::Paris => {
-            json_rpc::call(client, url_base, token, "engine_newPayloadV1", (&payload,)).await?
-        }
-        ForkArg::Shanghai => {
-            json_rpc::call(client, url_base, token, "engine_newPayloadV2", (&payload,)).await?
-        }
-        ForkArg::Cancun => {
-            json_rpc::call(
-                client,
-                url_base,
-                token,
-                "engine_newPayloadV3",
-                (&payload, Vec::<Value>::new(), ZERO_HASH),
-            )
-            .await?
-        }
-        ForkArg::Prague | ForkArg::Osaka => {
+        ForkArg::Osaka => {
             json_rpc::call(
                 client,
                 url_base,
@@ -224,29 +195,9 @@ async fn run_newpayload_ssz(
 ) -> Result<IterationRecord> {
     let url = format!("{url_base}/engine/v2/{}/payloads", ctx.fork.path());
     let (body, t0) = match ctx.fork {
-        ForkArg::Paris => {
+        ForkArg::Osaka => {
             let envelope =
-                fixtures::paris_newpayload_ssz(fixtures::DEFAULT_SEED, fixtures::DEFAULT_TX_COUNT);
-            let t0 = Instant::now();
-            (envelope.to_ssz(), t0)
-        }
-        ForkArg::Shanghai => {
-            let envelope = fixtures::shanghai_newpayload_ssz(
-                fixtures::DEFAULT_SEED,
-                fixtures::DEFAULT_TX_COUNT,
-            );
-            let t0 = Instant::now();
-            (envelope.to_ssz(), t0)
-        }
-        ForkArg::Cancun => {
-            let envelope =
-                fixtures::cancun_newpayload_ssz(fixtures::DEFAULT_SEED, fixtures::DEFAULT_TX_COUNT);
-            let t0 = Instant::now();
-            (envelope.to_ssz(), t0)
-        }
-        ForkArg::Prague | ForkArg::Osaka => {
-            let envelope =
-                fixtures::prague_newpayload_ssz(fixtures::DEFAULT_SEED, fixtures::DEFAULT_TX_COUNT);
+                fixtures::osaka_newpayload_ssz(fixtures::DEFAULT_SEED, fixtures::DEFAULT_TX_COUNT);
             let t0 = Instant::now();
             (envelope.to_ssz(), t0)
         }
@@ -283,10 +234,6 @@ async fn run_getpayload_json(
     ctx: &WorkloadContext,
 ) -> Result<IterationRecord> {
     let method = match ctx.fork {
-        ForkArg::Paris => "engine_getPayloadV1",
-        ForkArg::Shanghai => "engine_getPayloadV2",
-        ForkArg::Cancun => "engine_getPayloadV3",
-        ForkArg::Prague => "engine_getPayloadV4",
         ForkArg::Osaka => "engine_getPayloadV5",
         ForkArg::Amsterdam => "engine_getPayloadV6",
     };
@@ -342,7 +289,6 @@ async fn run_blobs_json(
     ctx: &WorkloadContext,
 ) -> Result<IterationRecord> {
     let method = match ctx.blobs_version {
-        1 => "engine_getBlobsV1",
         2 => "engine_getBlobsV2",
         _ => "engine_getBlobsV3",
     };
@@ -370,9 +316,7 @@ async fn run_blobs_ssz(
     token: &str,
     ctx: &WorkloadContext,
 ) -> Result<IterationRecord> {
-    use ethrex_rpc::engine_rest::types::blobs::{
-        BlobsV1Response, BlobsV2Response, VersionedHashList,
-    };
+    use ethrex_rpc::engine_rest::types::blobs::{BlobsV2Response, VersionedHashList};
     let hashes_arr: Vec<[u8; 32]> = ctx.blob_hashes.iter().map(|h| h.0).collect();
     let req: VersionedHashList = hashes_arr
         .try_into()
@@ -384,12 +328,9 @@ async fn run_blobs_ssz(
     let wall_time_us = t0.elapsed().as_micros();
     // 204 = all-or-nothing miss (v2): zero hits by definition.
     // `BlobsV2Response` and `BlobsV3Response` are the same SSZ type.
-    let hits = match (resp.status, ctx.blobs_version) {
-        (204, _) => Some(0),
-        (200, 1) => BlobsV1Response::from_ssz_bytes(&resp.body)
-            .ok()
-            .map(|r| r.entries.iter().filter(|e| e.available).count()),
-        (200, _) => BlobsV2Response::from_ssz_bytes(&resp.body)
+    let hits = match resp.status {
+        204 => Some(0),
+        200 => BlobsV2Response::from_ssz_bytes(&resp.body)
             .ok()
             .map(|r| r.entries.iter().filter(|e| e.available).count()),
         _ => None,
@@ -415,8 +356,8 @@ async fn run_bodies_json(
     ctx: &WorkloadContext,
 ) -> Result<IterationRecord> {
     let method = match ctx.fork {
+        ForkArg::Osaka => "engine_getPayloadBodiesByRangeV1",
         ForkArg::Amsterdam => "engine_getPayloadBodiesByRangeV2",
-        _ => "engine_getPayloadBodiesByRangeV1",
     };
     let t0 = Instant::now();
     let resp = json_rpc::call(
@@ -452,9 +393,7 @@ async fn run_bodies_ssz(
     token: &str,
     ctx: &WorkloadContext,
 ) -> Result<IterationRecord> {
-    use ethrex_rpc::engine_rest::types::bodies::{
-        BodiesResponseAmsterdam, BodiesResponseParis, BodiesResponseShanghai,
-    };
+    use ethrex_rpc::engine_rest::types::bodies::{BodiesResponseAmsterdam, BodiesResponseOsaka};
     let url = format!(
         "{url_base}/engine/v2/{}/bodies?from={}&count={}",
         ctx.fork.path(),
@@ -466,14 +405,9 @@ async fn run_bodies_ssz(
     let wall_time_us = t0.elapsed().as_micros();
     let hits = if resp.status == 200 {
         match ctx.fork {
-            ForkArg::Paris => BodiesResponseParis::from_ssz_bytes(&resp.body)
+            ForkArg::Osaka => BodiesResponseOsaka::from_ssz_bytes(&resp.body)
                 .ok()
                 .map(|r| r.entries.iter().filter(|e| e.available).count()),
-            ForkArg::Shanghai | ForkArg::Cancun | ForkArg::Prague | ForkArg::Osaka => {
-                BodiesResponseShanghai::from_ssz_bytes(&resp.body)
-                    .ok()
-                    .map(|r| r.entries.iter().filter(|e| e.available).count())
-            }
             ForkArg::Amsterdam => BodiesResponseAmsterdam::from_ssz_bytes(&resp.body)
                 .ok()
                 .map(|r| r.entries.iter().filter(|e| e.available).count()),

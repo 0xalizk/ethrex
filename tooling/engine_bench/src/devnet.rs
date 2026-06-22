@@ -22,10 +22,6 @@ const GENESIS_TEMPLATE: &str = include_str!("../../../fixtures/genesis/l1.json")
 
 fn fork_index(fork: ForkArg) -> usize {
     match fork {
-        ForkArg::Paris => 0,
-        ForkArg::Shanghai => 1,
-        ForkArg::Cancun => 2,
-        ForkArg::Prague => 3,
         ForkArg::Osaka => 4,
         ForkArg::Amsterdam => 5,
     }
@@ -166,10 +162,6 @@ async fn call_ok(
 
 fn getpayload_method(fork: ForkArg) -> &'static str {
     match fork {
-        ForkArg::Paris => "engine_getPayloadV1",
-        ForkArg::Shanghai => "engine_getPayloadV2",
-        ForkArg::Cancun => "engine_getPayloadV3",
-        ForkArg::Prague => "engine_getPayloadV4",
         ForkArg::Osaka => "engine_getPayloadV5",
         ForkArg::Amsterdam => "engine_getPayloadV6",
     }
@@ -211,39 +203,19 @@ pub async fn produce_blocks(
             (pid.as_str(),),
         )
         .await?;
-        // V1 returns the bare payload; V2+ wrap it (and V4+ add requests).
-        let (payload, requests) = if fork == ForkArg::Paris {
-            (result, json!([]))
-        } else {
-            let requests = result
-                .get("executionRequests")
-                .cloned()
-                .unwrap_or(json!([]));
-            (result["executionPayload"].clone(), requests)
-        };
+        // V5/V6 wrap the payload in an envelope and carry execution requests.
+        let requests = result
+            .get("executionRequests")
+            .cloned()
+            .unwrap_or(json!([]));
+        let payload = result["executionPayload"].clone();
         let block_hash = payload["blockHash"]
             .as_str()
             .ok_or_else(|| eyre!("built payload has no blockHash"))?
             .to_owned();
 
         let status = match fork {
-            ForkArg::Paris => {
-                call_ok(client, url, &token, "engine_newPayloadV1", (&payload,)).await?
-            }
-            ForkArg::Shanghai => {
-                call_ok(client, url, &token, "engine_newPayloadV2", (&payload,)).await?
-            }
-            ForkArg::Cancun => {
-                call_ok(
-                    client,
-                    url,
-                    &token,
-                    "engine_newPayloadV3",
-                    (&payload, json!([]), ZERO_HASH),
-                )
-                .await?
-            }
-            ForkArg::Prague | ForkArg::Osaka => {
+            ForkArg::Osaka => {
                 call_ok(
                     client,
                     url,

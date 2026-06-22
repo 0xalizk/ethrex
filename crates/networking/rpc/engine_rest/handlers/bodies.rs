@@ -16,11 +16,11 @@ use crate::engine_rest::fork_path::ForkPath;
 use crate::engine_rest::handlers::capabilities::BODIES_MAX_COUNT;
 use crate::engine_rest::responses::SszBody;
 use crate::engine_rest::types::bodies::{
-    BodiesByHashRequest, BodiesResponseAmsterdam, BodiesResponseParis, BodiesResponseShanghai,
-    BodyAmsterdam, BodyEntryAmsterdam, BodyEntryParis, BodyEntryShanghai, BodyParis, BodyShanghai,
+    BodiesByHashRequest, BodiesResponseAmsterdam, BodiesResponseOsaka, BodyAmsterdam,
+    BodyEntryAmsterdam, BodyEntryOsaka, BodyOsaka,
 };
 use crate::engine_rest::types::common::Bytes20;
-use crate::engine_rest::types::shanghai::Withdrawal as SszWithdrawal;
+use crate::engine_rest::types::common::Withdrawal as SszWithdrawal;
 use crate::rpc::RpcApiContext;
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -123,9 +123,8 @@ pub async fn bodies_by_range(
 /// Build the per-fork bodies response from the resolved blocks. A block is
 /// `available` only when it exists AND its timestamp falls inside the URL fork's
 /// active range (spec #793); otherwise the entry is `available == false` with a
-/// zero-valued body. The fork-shape grouping (Paris / Shanghai / Amsterdam) is
-/// independent of the per-entry era check, which always tests the specific URL
-/// fork.
+/// zero-valued body. The fork-shape grouping (Osaka / Amsterdam) is independent
+/// of the per-entry era check, which always tests the specific URL fork.
 async fn build_bodies_response(
     fork: Fork,
     blocks: Vec<Option<Block>>,
@@ -135,39 +134,20 @@ async fn build_bodies_response(
     let in_era = |block: &Block| chain_config.get_fork(block.header.timestamp) == fork;
 
     match fork {
-        Fork::Paris => {
-            let mut entries: Vec<BodyEntryParis> = Vec::with_capacity(blocks.len());
+        Fork::Osaka => {
+            let mut entries: Vec<BodyEntryOsaka> = Vec::with_capacity(blocks.len());
             for block_opt in blocks {
                 let entry = match block_opt {
-                    Some(block) if in_era(&block) => match paris_body_from_internal(block.body) {
-                        Ok(body) => BodyEntryParis::available(body),
+                    Some(block) if in_era(&block) => match osaka_body_from_internal(block.body) {
+                        Ok(body) => BodyEntryOsaka::available(body),
                         Err(p) => return p.into_response(),
                     },
-                    _ => BodyEntryParis::unavailable(),
+                    _ => BodyEntryOsaka::unavailable(),
                 };
                 entries.push(entry);
             }
             match entries.try_into() {
-                Ok(entries) => SszBody(BodiesResponseParis { entries }).into_response(),
-                Err(_) => bodies_overflow().into_response(),
-            }
-        }
-        Fork::Shanghai | Fork::Cancun | Fork::Prague | Fork::Osaka => {
-            let mut entries: Vec<BodyEntryShanghai> = Vec::with_capacity(blocks.len());
-            for block_opt in blocks {
-                let entry = match block_opt {
-                    Some(block) if in_era(&block) => {
-                        match shanghai_body_from_internal(block.body) {
-                            Ok(body) => BodyEntryShanghai::available(body),
-                            Err(p) => return p.into_response(),
-                        }
-                    }
-                    _ => BodyEntryShanghai::unavailable(),
-                };
-                entries.push(entry);
-            }
-            match entries.try_into() {
-                Ok(entries) => SszBody(BodiesResponseShanghai { entries }).into_response(),
+                Ok(entries) => SszBody(BodiesResponseOsaka { entries }).into_response(),
                 Err(_) => bodies_overflow().into_response(),
             }
         }
@@ -210,7 +190,7 @@ async fn build_bodies_response(
                 Err(_) => bodies_overflow().into_response(),
             }
         }
-        // Unreachable: ForkPath restricts to the 6 spec forks before the handler runs.
+        // Unreachable: ForkPath restricts to the osaka/amsterdam forks before the handler runs.
         _ => unreachable!("ForkPath restricts to spec forks"),
     }
 }
@@ -244,23 +224,7 @@ async fn bal_bytes_for_block(
 
 // ── internal → SSZ body conversions ───────────────────────────────────────────
 
-fn paris_body_from_internal(body: BlockBody) -> Result<BodyParis, ProblemJson> {
-    let sszed_txs = body
-        .transactions
-        .iter()
-        .map(|tx| {
-            tx.encode_canonical_to_vec()
-                .try_into()
-                .map_err(|_| ProblemJson::internal("transaction exceeds MAX_BYTES_PER_TRANSACTION"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let transactions = sszed_txs
-        .try_into()
-        .map_err(|_| ProblemJson::internal("transactions exceed MAX_TRANSACTIONS_PER_PAYLOAD"))?;
-    Ok(BodyParis { transactions })
-}
-
-fn shanghai_body_from_internal(body: BlockBody) -> Result<BodyShanghai, ProblemJson> {
+fn osaka_body_from_internal(body: BlockBody) -> Result<BodyOsaka, ProblemJson> {
     let sszed_txs = body
         .transactions
         .iter()
@@ -287,7 +251,7 @@ fn shanghai_body_from_internal(body: BlockBody) -> Result<BodyShanghai, ProblemJ
     let withdrawals = withdrawals_vec
         .try_into()
         .map_err(|_| ProblemJson::internal("withdrawals exceed MAX_WITHDRAWALS_PER_PAYLOAD"))?;
-    Ok(BodyShanghai {
+    Ok(BodyOsaka {
         transactions,
         withdrawals,
     })
@@ -297,13 +261,13 @@ fn amsterdam_body_from_internal(
     body: BlockBody,
     bal_bytes: Vec<u8>,
 ) -> Result<BodyAmsterdam, ProblemJson> {
-    let shanghai = shanghai_body_from_internal(body)?;
+    let osaka = osaka_body_from_internal(body)?;
     let block_access_list = bal_bytes
         .try_into()
         .map_err(|_| ProblemJson::internal("BAL bytes exceed MAX_BLOCK_ACCESS_LIST_BYTES"))?;
     Ok(BodyAmsterdam {
-        transactions: shanghai.transactions,
-        withdrawals: shanghai.withdrawals,
+        transactions: osaka.transactions,
+        withdrawals: osaka.withdrawals,
         block_access_list,
     })
 }

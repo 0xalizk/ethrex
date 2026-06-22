@@ -5,9 +5,9 @@
 //! replaces `engine_exchangeCapabilities`. JSON shape:
 //! ```json
 //! {
-//!   "supported_forks": ["paris", ...],
+//!   "supported_forks": ["osaka", ...],
 //!   "fork_scoped_endpoints": ["payloads", "forkchoice", "bodies"],
-//!   "independently_versioned": { "blobs": ["v1", ...] },
+//!   "independently_versioned": { "blobs": ["v2", ...] },
 //!   "unscoped_endpoints": ["capabilities", "identity"],
 //!   "limits": { "bodies.max_count": N, "blobs.max_versioned_hashes": N, "payload.max_bytes": N }
 //! }
@@ -63,17 +63,10 @@ pub fn capabilities() -> Capabilities {
     ]);
 
     Capabilities {
-        supported_forks: vec![
-            "paris".into(),
-            "shanghai".into(),
-            "cancun".into(),
-            "prague".into(),
-            "osaka".into(),
-            "amsterdam".into(),
-        ],
+        supported_forks: vec!["osaka".into(), "amsterdam".into()],
         fork_scoped_endpoints: vec!["payloads".into(), "forkchoice".into(), "bodies".into()],
         independently_versioned: IndependentlyVersioned {
-            blobs: vec!["v1".into(), "v2".into(), "v3".into(), "v4".into()],
+            blobs: vec!["v2".into(), "v3".into(), "v4".into()],
         },
         unscoped_endpoints: vec!["capabilities".into(), "identity".into()],
         limits,

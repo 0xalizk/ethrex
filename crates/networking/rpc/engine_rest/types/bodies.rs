@@ -11,9 +11,8 @@ use libssz_types::SszList;
 
 use super::common::{
     MAX_BLOCK_ACCESS_LIST_BYTES, MAX_BYTES_PER_TRANSACTION, MAX_TRANSACTIONS_PER_PAYLOAD,
-    MAX_WITHDRAWALS_PER_PAYLOAD,
+    MAX_WITHDRAWALS_PER_PAYLOAD, Withdrawal,
 };
-use super::shanghai::Withdrawal;
 
 /// Spec cap on hashes per `/{fork}/bodies/hash` request and on entries in any
 /// bodies response (`MAX_BODIES_REQUEST = 2**5`); matches the consensoor CL.
@@ -31,20 +30,14 @@ pub struct BodiesByHashRequest {
 
 // ── Per-fork ExecutionPayloadBody ─────────────────────────────────────────────
 
-/// Paris body: transactions only.
+/// Osaka body: transactions + withdrawals.
 #[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
-pub struct BodyParis {
-    pub transactions: SszList<SszList<u8, MAX_BYTES_PER_TRANSACTION>, MAX_TRANSACTIONS_PER_PAYLOAD>,
-}
-
-/// Shanghai/Cancun/Prague/Osaka body: transactions + withdrawals.
-#[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
-pub struct BodyShanghai {
+pub struct BodyOsaka {
     pub transactions: SszList<SszList<u8, MAX_BYTES_PER_TRANSACTION>, MAX_TRANSACTIONS_PER_PAYLOAD>,
     pub withdrawals: SszList<Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD>,
 }
 
-/// Amsterdam body: BodyShanghai + raw block_access_list bytes.
+/// Amsterdam body: BodyOsaka + raw block_access_list bytes.
 #[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
 pub struct BodyAmsterdam {
     pub transactions: SszList<SszList<u8, MAX_BYTES_PER_TRANSACTION>, MAX_TRANSACTIONS_PER_PAYLOAD>,
@@ -52,19 +45,10 @@ pub struct BodyAmsterdam {
     pub block_access_list: SszList<u8, MAX_BLOCK_ACCESS_LIST_BYTES>,
 }
 
-impl BodyParis {
+impl BodyOsaka {
     /// Zero-valued body for an `available == false` entry (CLs MUST ignore it).
     pub fn empty() -> Self {
-        BodyParis {
-            transactions: Vec::new().try_into().expect("empty list fits"),
-        }
-    }
-}
-
-impl BodyShanghai {
-    /// Zero-valued body for an `available == false` entry (CLs MUST ignore it).
-    pub fn empty() -> Self {
-        BodyShanghai {
+        BodyOsaka {
             transactions: Vec::new().try_into().expect("empty list fits"),
             withdrawals: Vec::new().try_into().expect("empty list fits"),
         }
@@ -84,18 +68,11 @@ impl BodyAmsterdam {
 
 // ── Per-fork BodyEntry { available, body } ────────────────────────────────────
 
-/// Paris bodies response entry.
+/// Osaka bodies response entry.
 #[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
-pub struct BodyEntryParis {
+pub struct BodyEntryOsaka {
     pub available: bool,
-    pub body: BodyParis,
-}
-
-/// Shanghai/Cancun/Prague/Osaka bodies response entry.
-#[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
-pub struct BodyEntryShanghai {
-    pub available: bool,
-    pub body: BodyShanghai,
+    pub body: BodyOsaka,
 }
 
 /// Amsterdam bodies response entry.
@@ -105,8 +82,8 @@ pub struct BodyEntryAmsterdam {
     pub body: BodyAmsterdam,
 }
 
-impl BodyEntryParis {
-    pub fn available(body: BodyParis) -> Self {
+impl BodyEntryOsaka {
+    pub fn available(body: BodyOsaka) -> Self {
         Self {
             available: true,
             body,
@@ -115,22 +92,7 @@ impl BodyEntryParis {
     pub fn unavailable() -> Self {
         Self {
             available: false,
-            body: BodyParis::empty(),
-        }
-    }
-}
-
-impl BodyEntryShanghai {
-    pub fn available(body: BodyShanghai) -> Self {
-        Self {
-            available: true,
-            body,
-        }
-    }
-    pub fn unavailable() -> Self {
-        Self {
-            available: false,
-            body: BodyShanghai::empty(),
+            body: BodyOsaka::empty(),
         }
     }
 }
@@ -154,15 +116,10 @@ impl BodyEntryAmsterdam {
 //
 // Shared by both `POST /{fork}/bodies/hash` and `GET /{fork}/bodies` (range).
 
-/// Paris bodies response: `{ entries: List[BodyEntryParis, N] }`.
+/// Osaka bodies response: `{ entries: List[BodyEntryOsaka, N] }`.
 #[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
-pub struct BodiesResponseParis {
-    pub entries: SszList<BodyEntryParis, MAX_BODIES_PER_REQUEST>,
-}
-/// Shanghai/Cancun/Prague/Osaka bodies response.
-#[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
-pub struct BodiesResponseShanghai {
-    pub entries: SszList<BodyEntryShanghai, MAX_BODIES_PER_REQUEST>,
+pub struct BodiesResponseOsaka {
+    pub entries: SszList<BodyEntryOsaka, MAX_BODIES_PER_REQUEST>,
 }
 /// Amsterdam bodies response.
 #[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]

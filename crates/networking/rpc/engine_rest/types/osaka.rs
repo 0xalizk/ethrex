@@ -1,11 +1,58 @@
-//! Osaka submission shapes — identical to Prague.
+//! Osaka-shape SSZ types — the base payload shape served by the engine REST API.
 //!
-//! The fork distinction (cell proofs on blob bundles) lives on the response side
-//! of `/blobs/v2`–`/blobs/v3`, not in the submission shapes. These are direct
-//! re-exports for readability and so tests can name the Osaka types explicitly;
-//! the `payloads`/`forkchoice` handlers dispatch `Fork::Osaka` straight to the
-//! `prague::` types rather than going through this module.
+//! Osaka is the earliest fork the API serves, so this module owns the base
+//! `ExecutionPayload` (withdrawals + blob-gas fields), `ExecutionPayloadEnvelope`
+//! (+ beacon block root + execution_requests), and `PayloadAttributes`. The
+//! Osaka-vs-Amsterdam distinction (cell-proof blob bundles) lives on the response
+//! side (`/blobs/v2`–`v3`, `BuiltPayloadOsaka`), not in these submission shapes.
 
-pub use crate::engine_rest::types::prague::{
-    ExecutionPayload, ExecutionPayloadEnvelope, PayloadAttributes,
+use libssz_derive::{HashTreeRoot, SszDecode, SszEncode};
+use libssz_types::SszList;
+
+use super::common::{
+    Bytes20, LogsBloom, MAX_BYTES_PER_TRANSACTION, MAX_EXECUTION_REQUESTS_PER_PAYLOAD,
+    MAX_EXTRA_DATA_BYTES, MAX_REQUEST_BYTES, MAX_TRANSACTIONS_PER_PAYLOAD,
+    MAX_WITHDRAWALS_PER_PAYLOAD, Withdrawal,
 };
+
+/// Osaka `ExecutionPayload`.
+#[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
+pub struct ExecutionPayload {
+    pub parent_hash: [u8; 32],
+    pub fee_recipient: Bytes20,
+    pub state_root: [u8; 32],
+    pub receipts_root: [u8; 32],
+    pub logs_bloom: LogsBloom,
+    pub prev_randao: [u8; 32],
+    pub block_number: u64,
+    pub gas_limit: u64,
+    pub gas_used: u64,
+    pub timestamp: u64,
+    pub extra_data: SszList<u8, MAX_EXTRA_DATA_BYTES>,
+    pub base_fee_per_gas: [u8; 32],
+    pub block_hash: [u8; 32],
+    pub transactions: SszList<SszList<u8, MAX_BYTES_PER_TRANSACTION>, MAX_TRANSACTIONS_PER_PAYLOAD>,
+    pub withdrawals: SszList<Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD>,
+    pub blob_gas_used: u64,
+    pub excess_blob_gas: u64,
+}
+
+/// Osaka envelope: payload + parent_beacon_block_root + `execution_requests`.
+/// Each `execution_requests[i]` is a type-prefixed byte vector per EIP-7685.
+#[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
+pub struct ExecutionPayloadEnvelope {
+    pub execution_payload: ExecutionPayload,
+    pub parent_beacon_block_root: [u8; 32],
+    pub execution_requests:
+        SszList<SszList<u8, MAX_REQUEST_BYTES>, MAX_EXECUTION_REQUESTS_PER_PAYLOAD>,
+}
+
+/// Osaka payload attributes.
+#[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
+pub struct PayloadAttributes {
+    pub timestamp: u64,
+    pub prev_randao: [u8; 32],
+    pub suggested_fee_recipient: Bytes20,
+    pub withdrawals: SszList<Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD>,
+    pub parent_beacon_block_root: [u8; 32],
+}

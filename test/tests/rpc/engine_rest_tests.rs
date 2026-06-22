@@ -83,12 +83,17 @@ mod fork_path_tests {
 
     #[test]
     fn parse_supported_forks() {
-        assert_eq!(parse_fork_segment("paris").unwrap(), Fork::Paris);
-        assert_eq!(parse_fork_segment("shanghai").unwrap(), Fork::Shanghai);
-        assert_eq!(parse_fork_segment("cancun").unwrap(), Fork::Cancun);
-        assert_eq!(parse_fork_segment("prague").unwrap(), Fork::Prague);
         assert_eq!(parse_fork_segment("osaka").unwrap(), Fork::Osaka);
         assert_eq!(parse_fork_segment("amsterdam").unwrap(), Fork::Amsterdam);
+    }
+
+    #[test]
+    fn rejects_pre_fusaka_forks() {
+        // Pre-Fusaka forks are no longer served by the REST API.
+        assert!(parse_fork_segment("paris").is_err());
+        assert!(parse_fork_segment("shanghai").is_err());
+        assert!(parse_fork_segment("cancun").is_err());
+        assert!(parse_fork_segment("prague").is_err());
     }
 
     #[test]
@@ -321,21 +326,8 @@ mod capabilities_tests {
         );
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let caps: Capabilities = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            caps.supported_forks,
-            vec![
-                "paris",
-                "shanghai",
-                "cancun",
-                "prague",
-                "osaka",
-                "amsterdam"
-            ]
-        );
-        assert_eq!(
-            caps.independently_versioned.blobs,
-            vec!["v1", "v2", "v3", "v4"]
-        );
+        assert_eq!(caps.supported_forks, vec!["osaka", "amsterdam"]);
+        assert_eq!(caps.independently_versioned.blobs, vec!["v2", "v3", "v4"]);
         assert_eq!(
             caps.fork_scoped_endpoints,
             vec!["payloads", "forkchoice", "bodies"]
@@ -435,7 +427,7 @@ mod router_tests {
         let token = make_jwt(&secret);
         let req = axum::http::Request::builder()
             .method("POST")
-            .uri("/cancun/payloads")
+            .uri("/osaka/payloads")
             .header("authorization", format!("Bearer {token}"))
             .body(axum::body::Body::empty())
             .unwrap();
@@ -449,8 +441,8 @@ mod router_tests {
         for (method, uri) in [
             ("GET", "/identity"),
             ("GET", "/capabilities"),
-            ("POST", "/cancun/payloads"),
-            ("POST", "/blobs/v1"),
+            ("POST", "/osaka/payloads"),
+            ("POST", "/blobs/v2"),
         ] {
             let app = app.clone();
             let req = axum::http::Request::builder()
@@ -778,170 +770,16 @@ mod common_types_tests {
     }
 }
 
-mod paris_types_tests {
-    use ethrex_rpc::engine_rest::types::paris::{
-        Bytes20, ExecutionPayload as ParisPayload, ExecutionPayloadEnvelope as ParisEnvelope,
-        PayloadAttributes as ParisAttrs,
+mod osaka_types_tests {
+    use ethrex_rpc::engine_rest::types::common::{Bytes20, Withdrawal};
+    use ethrex_rpc::engine_rest::types::osaka::{
+        ExecutionPayload as OsakaPayload, ExecutionPayloadEnvelope as OsakaEnvelope,
+        PayloadAttributes as OsakaAttrs,
     };
     use libssz::{SszDecode, SszEncode};
 
-    fn sample_payload() -> ParisPayload {
-        ParisPayload {
-            parent_hash: [1; 32],
-            fee_recipient: Bytes20([2; 20]),
-            state_root: [3; 32],
-            receipts_root: [4; 32],
-            logs_bloom: vec![5u8; 256].try_into().expect("logs_bloom length"),
-            prev_randao: [6; 32],
-            block_number: 1234,
-            gas_limit: 30_000_000,
-            gas_used: 21_000,
-            timestamp: 1_700_000_000,
-            extra_data: vec![0xAA, 0xBB].try_into().expect("extra_data fits"),
-            base_fee_per_gas: [7; 32],
-            block_hash: [8; 32],
-            transactions: vec![vec![0xC0, 0xC1].try_into().expect("tx bytes fit")]
-                .try_into()
-                .expect("txs fit"),
-        }
-    }
-
-    #[test]
-    fn paris_payload_roundtrips() {
-        let p = sample_payload();
-        let bytes = p.to_ssz();
-        let back = ParisPayload::from_ssz_bytes(&bytes).unwrap();
-        assert_eq!(back, p);
-    }
-
-    #[test]
-    fn paris_envelope_roundtrips() {
-        let envelope = ParisEnvelope {
-            execution_payload: sample_payload(),
-        };
-        let bytes = envelope.to_ssz();
-        let back = ParisEnvelope::from_ssz_bytes(&bytes).unwrap();
-        assert_eq!(back.execution_payload, envelope.execution_payload);
-    }
-
-    #[test]
-    fn paris_attrs_roundtrip() {
-        let attrs = ParisAttrs {
-            timestamp: 1_700_000_001,
-            prev_randao: [9; 32],
-            suggested_fee_recipient: Bytes20([10; 20]),
-        };
-        let bytes = attrs.to_ssz();
-        let back = ParisAttrs::from_ssz_bytes(&bytes).unwrap();
-        assert_eq!(back, attrs);
-    }
-
-    #[test]
-    fn paris_payload_roundtrips_with_empty_collections() {
-        let p = ParisPayload {
-            parent_hash: [0; 32],
-            fee_recipient: Bytes20([0; 20]),
-            state_root: [0; 32],
-            receipts_root: [0; 32],
-            logs_bloom: vec![0; 256].try_into().unwrap(),
-            prev_randao: [0; 32],
-            block_number: 0,
-            gas_limit: 30_000_000,
-            gas_used: 0,
-            timestamp: 0,
-            extra_data: vec![].try_into().unwrap(),
-            base_fee_per_gas: [0; 32],
-            block_hash: [0; 32],
-            transactions: vec![].try_into().unwrap(),
-        };
-        let bytes = p.to_ssz();
-        let back = ParisPayload::from_ssz_bytes(&bytes).unwrap();
-        assert_eq!(back, p);
-    }
-}
-
-mod shanghai_types_tests {
-    use ethrex_rpc::engine_rest::types::common::Bytes20;
-    use ethrex_rpc::engine_rest::types::shanghai::{
-        ExecutionPayload as ShanghaiPayload, ExecutionPayloadEnvelope as ShanghaiEnvelope,
-        PayloadAttributes as ShanghaiAttrs, Withdrawal,
-    };
-    use libssz::{SszDecode, SszEncode};
-
-    fn sample_withdrawal() -> Withdrawal {
-        Withdrawal {
-            index: 17,
-            validator_index: 7777,
-            address: Bytes20([0xAB; 20]),
-            amount: 32_000_000_000,
-        }
-    }
-
-    fn sample_payload() -> ShanghaiPayload {
-        ShanghaiPayload {
-            parent_hash: [1; 32],
-            fee_recipient: Bytes20([2; 20]),
-            state_root: [3; 32],
-            receipts_root: [4; 32],
-            logs_bloom: vec![5; 256].try_into().unwrap(),
-            prev_randao: [6; 32],
-            block_number: 1234,
-            gas_limit: 30_000_000,
-            gas_used: 21_000,
-            timestamp: 1_700_000_000,
-            extra_data: vec![0xAA].try_into().unwrap(),
-            base_fee_per_gas: [7; 32],
-            block_hash: [8; 32],
-            transactions: vec![vec![0xC0].try_into().unwrap()].try_into().unwrap(),
-            withdrawals: vec![sample_withdrawal()].try_into().unwrap(),
-        }
-    }
-
-    #[test]
-    fn shanghai_payload_roundtrips_with_withdrawals() {
-        let p = sample_payload();
-        let bytes = p.to_ssz();
-        let back = ShanghaiPayload::from_ssz_bytes(&bytes).unwrap();
-        assert_eq!(back, p);
-        assert_eq!(back.withdrawals.len(), 1);
-        assert_eq!(back.withdrawals[0].validator_index, 7777);
-    }
-
-    #[test]
-    fn shanghai_envelope_roundtrips() {
-        let env = ShanghaiEnvelope {
-            execution_payload: sample_payload(),
-        };
-        let bytes = env.to_ssz();
-        let back = ShanghaiEnvelope::from_ssz_bytes(&bytes).unwrap();
-        assert_eq!(back.execution_payload, env.execution_payload);
-    }
-
-    #[test]
-    fn shanghai_attrs_roundtrip() {
-        let attrs = ShanghaiAttrs {
-            timestamp: 1_700_000_001,
-            prev_randao: [9; 32],
-            suggested_fee_recipient: Bytes20([10; 20]),
-            withdrawals: vec![sample_withdrawal()].try_into().unwrap(),
-        };
-        let bytes = attrs.to_ssz();
-        let back = ShanghaiAttrs::from_ssz_bytes(&bytes).unwrap();
-        assert_eq!(back, attrs);
-    }
-}
-
-mod cancun_types_tests {
-    use ethrex_rpc::engine_rest::types::cancun::{
-        ExecutionPayload as CancunPayload, ExecutionPayloadEnvelope as CancunEnvelope,
-        PayloadAttributes as CancunAttrs,
-    };
-    use ethrex_rpc::engine_rest::types::common::Bytes20;
-    use ethrex_rpc::engine_rest::types::shanghai::Withdrawal;
-    use libssz::{SszDecode, SszEncode};
-
-    fn sample_payload() -> CancunPayload {
-        CancunPayload {
+    fn sample_payload() -> OsakaPayload {
+        OsakaPayload {
             parent_hash: [1; 32],
             fee_recipient: Bytes20([2; 20]),
             state_root: [3; 32],
@@ -970,84 +808,19 @@ mod cancun_types_tests {
     }
 
     #[test]
-    fn cancun_payload_roundtrips_with_blob_fields() {
+    fn osaka_payload_roundtrips_with_blob_fields() {
         let p = sample_payload();
         let bytes = p.to_ssz();
-        let back = CancunPayload::from_ssz_bytes(&bytes).unwrap();
+        let back = OsakaPayload::from_ssz_bytes(&bytes).unwrap();
         assert_eq!(back, p);
         assert_eq!(back.blob_gas_used, 393_216);
         assert_eq!(back.excess_blob_gas, 786_432);
+        assert_eq!(back.withdrawals.len(), 1);
     }
 
     #[test]
-    fn cancun_envelope_roundtrips_with_beacon_root() {
-        let env = CancunEnvelope {
-            execution_payload: sample_payload(),
-            parent_beacon_block_root: [0xBB; 32],
-        };
-        let bytes = env.to_ssz();
-        let back = CancunEnvelope::from_ssz_bytes(&bytes).unwrap();
-        assert_eq!(back.execution_payload, env.execution_payload);
-        assert_eq!(back.parent_beacon_block_root, [0xBB; 32]);
-    }
-
-    #[test]
-    fn cancun_attrs_roundtrip_with_beacon_root() {
-        let attrs = CancunAttrs {
-            timestamp: 1_700_000_001,
-            prev_randao: [9; 32],
-            suggested_fee_recipient: Bytes20([10; 20]),
-            withdrawals: vec![].try_into().unwrap(),
-            parent_beacon_block_root: [0xCC; 32],
-        };
-        let bytes = attrs.to_ssz();
-        let back = CancunAttrs::from_ssz_bytes(&bytes).unwrap();
-        assert_eq!(back, attrs);
-        assert_eq!(back.parent_beacon_block_root, [0xCC; 32]);
-    }
-}
-
-mod prague_types_tests {
-    use ethrex_rpc::engine_rest::types::common::Bytes20;
-    use ethrex_rpc::engine_rest::types::prague::{
-        ExecutionPayload as PraguePayload, ExecutionPayloadEnvelope as PragueEnvelope,
-        PayloadAttributes as PragueAttrs,
-    };
-    use ethrex_rpc::engine_rest::types::shanghai::Withdrawal;
-    use libssz::{SszDecode, SszEncode};
-
-    fn sample_payload() -> PraguePayload {
-        PraguePayload {
-            parent_hash: [1; 32],
-            fee_recipient: Bytes20([2; 20]),
-            state_root: [3; 32],
-            receipts_root: [4; 32],
-            logs_bloom: vec![5; 256].try_into().unwrap(),
-            prev_randao: [6; 32],
-            block_number: 1234,
-            gas_limit: 30_000_000,
-            gas_used: 21_000,
-            timestamp: 1_700_000_000,
-            extra_data: vec![0xAA].try_into().unwrap(),
-            base_fee_per_gas: [7; 32],
-            block_hash: [8; 32],
-            transactions: vec![vec![0xC0].try_into().unwrap()].try_into().unwrap(),
-            withdrawals: vec![Withdrawal {
-                index: 1,
-                validator_index: 2,
-                address: Bytes20([3; 20]),
-                amount: 4,
-            }]
-            .try_into()
-            .unwrap(),
-            blob_gas_used: 0,
-            excess_blob_gas: 0,
-        }
-    }
-
-    #[test]
-    fn prague_envelope_roundtrips_with_execution_requests() {
-        let env = PragueEnvelope {
+    fn osaka_envelope_roundtrips_with_execution_requests() {
+        let env = OsakaEnvelope {
             execution_payload: sample_payload(),
             parent_beacon_block_root: [0xBB; 32],
             execution_requests: vec![
@@ -1058,15 +831,17 @@ mod prague_types_tests {
             .unwrap(),
         };
         let bytes = env.to_ssz();
-        let back = PragueEnvelope::from_ssz_bytes(&bytes).unwrap();
+        let back = OsakaEnvelope::from_ssz_bytes(&bytes).unwrap();
+        assert_eq!(back.execution_payload, env.execution_payload);
+        assert_eq!(back.parent_beacon_block_root, [0xBB; 32]);
         assert_eq!(back.execution_requests.len(), 2);
         assert_eq!(back.execution_requests[0][0], 0x00);
         assert_eq!(back.execution_requests[1][0], 0x01);
     }
 
     #[test]
-    fn prague_attrs_roundtrip() {
-        let attrs = PragueAttrs {
+    fn osaka_attrs_roundtrip() {
+        let attrs = OsakaAttrs {
             timestamp: 1_700_000_001,
             prev_randao: [9; 32],
             suggested_fee_recipient: Bytes20([10; 20]),
@@ -1074,74 +849,9 @@ mod prague_types_tests {
             parent_beacon_block_root: [0xCC; 32],
         };
         let bytes = attrs.to_ssz();
-        let back = PragueAttrs::from_ssz_bytes(&bytes).unwrap();
+        let back = OsakaAttrs::from_ssz_bytes(&bytes).unwrap();
         assert_eq!(back, attrs);
-    }
-}
-
-mod osaka_types_tests {
-    use ethrex_rpc::engine_rest::types::common::Bytes20;
-    use ethrex_rpc::engine_rest::types::osaka::{
-        ExecutionPayload as OsakaPayload, ExecutionPayloadEnvelope as OsakaEnvelope,
-        PayloadAttributes as OsakaAttrs,
-    };
-
-    #[test]
-    fn osaka_payload_is_type_alias_for_prague_via_pub_use() {
-        // Compile-time check: a Prague-shaped payload assigns into the Osaka alias.
-        let _: OsakaPayload = ethrex_rpc::engine_rest::types::prague::ExecutionPayload {
-            parent_hash: [0; 32],
-            fee_recipient: Bytes20([0; 20]),
-            state_root: [0; 32],
-            receipts_root: [0; 32],
-            logs_bloom: vec![0; 256].try_into().unwrap(),
-            prev_randao: [0; 32],
-            block_number: 0,
-            gas_limit: 0,
-            gas_used: 0,
-            timestamp: 0,
-            extra_data: vec![].try_into().unwrap(),
-            base_fee_per_gas: [0; 32],
-            block_hash: [0; 32],
-            transactions: vec![].try_into().unwrap(),
-            withdrawals: vec![].try_into().unwrap(),
-            blob_gas_used: 0,
-            excess_blob_gas: 0,
-        };
-    }
-
-    #[test]
-    fn osaka_envelope_and_attrs_are_aliases() {
-        let _: OsakaEnvelope = ethrex_rpc::engine_rest::types::prague::ExecutionPayloadEnvelope {
-            execution_payload: ethrex_rpc::engine_rest::types::prague::ExecutionPayload {
-                parent_hash: [0; 32],
-                fee_recipient: Bytes20([0; 20]),
-                state_root: [0; 32],
-                receipts_root: [0; 32],
-                logs_bloom: vec![0; 256].try_into().unwrap(),
-                prev_randao: [0; 32],
-                block_number: 0,
-                gas_limit: 0,
-                gas_used: 0,
-                timestamp: 0,
-                extra_data: vec![].try_into().unwrap(),
-                base_fee_per_gas: [0; 32],
-                block_hash: [0; 32],
-                transactions: vec![].try_into().unwrap(),
-                withdrawals: vec![].try_into().unwrap(),
-                blob_gas_used: 0,
-                excess_blob_gas: 0,
-            },
-            parent_beacon_block_root: [0; 32],
-            execution_requests: vec![].try_into().unwrap(),
-        };
-        let _: OsakaAttrs = ethrex_rpc::engine_rest::types::prague::PayloadAttributes {
-            timestamp: 0,
-            prev_randao: [0; 32],
-            suggested_fee_recipient: Bytes20([0; 20]),
-            withdrawals: vec![].try_into().unwrap(),
-            parent_beacon_block_root: [0; 32],
-        };
+        assert_eq!(back.parent_beacon_block_root, [0xCC; 32]);
     }
 }
 
@@ -1150,8 +860,7 @@ mod amsterdam_types_tests {
         ExecutionPayload as AmsterdamPayload, ExecutionPayloadEnvelope as AmsterdamEnvelope,
         PayloadAttributes as AmsterdamAttrs,
     };
-    use ethrex_rpc::engine_rest::types::common::Bytes20;
-    use ethrex_rpc::engine_rest::types::shanghai::Withdrawal;
+    use ethrex_rpc::engine_rest::types::common::{Bytes20, Withdrawal};
     use libssz::{SszDecode, SszEncode};
 
     fn sample_payload() -> AmsterdamPayload {
@@ -1235,78 +944,9 @@ mod conversion_tests {
         DecodedNewPayload, EngineCall, IntoEngineCall,
     };
 
-    fn paris_empty_envelope() -> ethrex_rpc::engine_rest::types::paris::ExecutionPayloadEnvelope {
-        use ethrex_rpc::engine_rest::types::paris::*;
-        ExecutionPayloadEnvelope {
-            execution_payload: ExecutionPayload {
-                parent_hash: [0; 32],
-                fee_recipient: Bytes20([0; 20]),
-                state_root: [0; 32],
-                receipts_root: [0; 32],
-                logs_bloom: vec![0; 256].try_into().unwrap(),
-                prev_randao: [0; 32],
-                block_number: 0,
-                gas_limit: 30_000_000,
-                gas_used: 0,
-                timestamp: 0,
-                extra_data: vec![].try_into().unwrap(),
-                base_fee_per_gas: {
-                    let mut a = [0u8; 32];
-                    a[0] = 0x07; // small little-endian value (7 wei)
-                    a
-                },
-                block_hash: [0; 32],
-                transactions: vec![].try_into().unwrap(),
-            },
-        }
-    }
-
     #[test]
-    fn paris_envelope_dispatches_to_v1v2() {
-        let env = paris_empty_envelope();
-        let DecodedNewPayload { block, call, .. } = env.into_engine_call().expect("conversion");
-        assert!(matches!(call, EngineCall::V1V2));
-        assert_eq!(block.header.gas_limit, 30_000_000);
-        assert_eq!(block.header.base_fee_per_gas, Some(7));
-    }
-
-    #[test]
-    fn cancun_envelope_dispatches_to_v3_with_beacon_root() {
-        use ethrex_rpc::engine_rest::types::cancun::*;
-        let env = ExecutionPayloadEnvelope {
-            execution_payload: ExecutionPayload {
-                parent_hash: [0; 32],
-                fee_recipient: Bytes20([0; 20]),
-                state_root: [0; 32],
-                receipts_root: [0; 32],
-                logs_bloom: vec![0; 256].try_into().unwrap(),
-                prev_randao: [0; 32],
-                block_number: 0,
-                gas_limit: 30_000_000,
-                gas_used: 0,
-                timestamp: 0,
-                extra_data: vec![].try_into().unwrap(),
-                base_fee_per_gas: [0; 32],
-                block_hash: [0; 32],
-                transactions: vec![].try_into().unwrap(),
-                withdrawals: vec![].try_into().unwrap(),
-                blob_gas_used: 0,
-                excess_blob_gas: 0,
-            },
-            parent_beacon_block_root: [0xBB; 32],
-        };
-        let DecodedNewPayload { block, call, .. } = env.into_engine_call().expect("conversion");
-        assert!(matches!(call, EngineCall::V3), "expected V3, got {call:?}");
-        // parent_beacon_block_root is baked into the reconstructed header.
-        assert_eq!(
-            block.header.parent_beacon_block_root,
-            Some(ethrex_common::H256::from([0xBB; 32]))
-        );
-    }
-
-    #[test]
-    fn prague_envelope_dispatches_to_v4_with_requests() {
-        use ethrex_rpc::engine_rest::types::prague::*;
+    fn osaka_envelope_dispatches_to_v4_with_requests() {
+        use ethrex_rpc::engine_rest::types::osaka::*;
         let env = ExecutionPayloadEnvelope {
             execution_payload: ExecutionPayload {
                 parent_hash: [0; 32],
@@ -1334,6 +974,11 @@ mod conversion_tests {
         };
         let DecodedNewPayload { block, call, .. } = env.into_engine_call().expect("conversion");
         assert!(matches!(call, EngineCall::V4), "expected V4, got {call:?}");
+        // parent_beacon_block_root is baked into the reconstructed header.
+        assert_eq!(
+            block.header.parent_beacon_block_root,
+            Some(ethrex_common::H256::from([0xBB; 32]))
+        );
         // The decoded execution_requests are folded into the header's requests_hash;
         // assert on that observable state rather than on a now-removed enum field.
         let expected = ethrex_common::types::requests::compute_requests_hash(&[
@@ -1342,46 +987,6 @@ mod conversion_tests {
             ])),
         ]);
         assert_eq!(block.header.requests_hash, Some(expected));
-    }
-
-    #[test]
-    fn shanghai_envelope_dispatches_to_v1v2_no_blob_fields() {
-        use ethrex_rpc::engine_rest::types::shanghai::*;
-        let env = ExecutionPayloadEnvelope {
-            execution_payload: ExecutionPayload {
-                parent_hash: [0; 32],
-                fee_recipient: Bytes20([0; 20]),
-                state_root: [0; 32],
-                receipts_root: [0; 32],
-                logs_bloom: vec![0; 256].try_into().unwrap(),
-                prev_randao: [0; 32],
-                block_number: 0,
-                gas_limit: 30_000_000,
-                gas_used: 0,
-                timestamp: 0,
-                extra_data: vec![].try_into().unwrap(),
-                base_fee_per_gas: [0; 32],
-                block_hash: [0; 32],
-                transactions: vec![].try_into().unwrap(),
-                withdrawals: vec![Withdrawal {
-                    index: 1,
-                    validator_index: 2,
-                    address: Bytes20([3; 20]),
-                    amount: 4,
-                }]
-                .try_into()
-                .unwrap(),
-            },
-        };
-        let DecodedNewPayload { block, call, .. } = env.into_engine_call().expect("conversion");
-        assert!(matches!(call, EngineCall::V1V2));
-        // Critical: Shanghai blocks MUST have None for blob fields, not Some(0).
-        assert_eq!(block.header.blob_gas_used, None);
-        assert_eq!(block.header.excess_blob_gas, None);
-        assert!(
-            block.body.withdrawals.is_some(),
-            "Shanghai must carry withdrawals"
-        );
     }
 
     #[test]
@@ -1433,70 +1038,9 @@ mod submit_payload_tests {
     use axum::http::StatusCode;
     use bytes::Bytes;
     use ethrex_rpc::engine_rest::router;
-    use ethrex_rpc::engine_rest::types::cancun::{
-        ExecutionPayload as CancunPayload, ExecutionPayloadEnvelope as CancunEnv,
-    };
-    use ethrex_rpc::engine_rest::types::common::Bytes20;
     use ethrex_rpc::test_utils::default_context_with_storage;
     use ethrex_rpc::test_utils::setup_store;
-    use libssz::SszEncode;
     use tower::ServiceExt;
-
-    fn empty_cancun_envelope() -> CancunEnv {
-        CancunEnv {
-            execution_payload: CancunPayload {
-                parent_hash: [0; 32],
-                fee_recipient: Bytes20([0; 20]),
-                state_root: [0; 32],
-                receipts_root: [0; 32],
-                logs_bloom: vec![0; 256].try_into().unwrap(),
-                prev_randao: [0; 32],
-                block_number: 0,
-                gas_limit: 30_000_000,
-                gas_used: 0,
-                timestamp: 0,
-                extra_data: vec![].try_into().unwrap(),
-                base_fee_per_gas: [0; 32],
-                block_hash: [0; 32],
-                transactions: vec![].try_into().unwrap(),
-                withdrawals: vec![].try_into().unwrap(),
-                blob_gas_used: 0,
-                excess_blob_gas: 0,
-            },
-            parent_beacon_block_root: [0; 32],
-        }
-    }
-
-    /// On the test genesis Osaka is active from timestamp 0, so a Cancun-shaped
-    /// payload (timestamp 0 → Osaka era) submitted to `/cancun/payloads` is
-    /// misrouted. The fork-boundary check (mirroring JSON-RPC NewPayloadV3
-    /// `validate_fork(Cancun)`) rejects it with 400 instead of letting it fall
-    /// through to an INVALID block-hash mismatch.
-    #[tokio::test]
-    async fn submit_wrong_fork_payload_returns_400() {
-        let storage = setup_store().await;
-        let mut ctx = default_context_with_storage(storage).await;
-        let secret = Bytes::from(vec![0xAB; 32]);
-        ctx.node_data.jwt_secret = secret.clone();
-        let app = router(ctx);
-        let token = auth_token(&secret).await;
-
-        let env = empty_cancun_envelope();
-        let body = env.to_ssz();
-        let req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/cancun/payloads")
-            .header("authorization", format!("Bearer {token}"))
-            .header("content-type", "application/octet-stream")
-            .body(axum::body::Body::from(body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), 400);
-        assert_eq!(
-            resp.headers().get("content-type").unwrap(),
-            "application/problem+json"
-        );
-    }
 
     #[tokio::test]
     async fn submit_malformed_ssz_returns_400_problem_json() {
@@ -1509,7 +1053,7 @@ mod submit_payload_tests {
 
         let req = axum::http::Request::builder()
             .method("POST")
-            .uri("/cancun/payloads")
+            .uri("/osaka/payloads")
             .header("authorization", format!("Bearer {token}"))
             .header("content-type", "application/octet-stream")
             .body(axum::body::Body::from(vec![0xFFu8; 10])) // not a valid envelope
@@ -1543,7 +1087,7 @@ mod get_payload_tests {
 
         let req = axum::http::Request::builder()
             .method("GET")
-            .uri("/cancun/payloads/0x0102030405060708")
+            .uri("/osaka/payloads/0x0102030405060708")
             .header("authorization", format!("Bearer {token}"))
             .body(axum::body::Body::empty())
             .unwrap();
@@ -1565,7 +1109,7 @@ mod get_payload_tests {
 
         let req = axum::http::Request::builder()
             .method("GET")
-            .uri("/cancun/payloads/not-hex")
+            .uri("/osaka/payloads/not-hex")
             .header("authorization", format!("Bearer {token}"))
             .body(axum::body::Body::empty())
             .unwrap();
@@ -1581,7 +1125,7 @@ mod forkchoice_handler_tests {
     use ethrex_rpc::engine_rest::types::common::{
         ForkchoiceResponse, ForkchoiceState, to_optional,
     };
-    use ethrex_rpc::engine_rest::types::forkchoice_update::CancunForkchoiceUpdate;
+    use ethrex_rpc::engine_rest::types::forkchoice_update::OsakaForkchoiceUpdate;
     use ethrex_rpc::test_utils::default_context_with_storage;
     use ethrex_rpc::test_utils::setup_store;
     use http_body_util::BodyExt;
@@ -1597,7 +1141,7 @@ mod forkchoice_handler_tests {
         let app = router(ctx);
         let token = auth_token(&secret).await;
 
-        let update = CancunForkchoiceUpdate {
+        let update = OsakaForkchoiceUpdate {
             state: ForkchoiceState {
                 head_block_hash: [0xFF; 32], // unknown head
                 safe_block_hash: [0; 32],
@@ -1608,7 +1152,7 @@ mod forkchoice_handler_tests {
         let body = update.to_ssz();
         let req = axum::http::Request::builder()
             .method("POST")
-            .uri("/cancun/forkchoice")
+            .uri("/osaka/forkchoice")
             .header("authorization", format!("Bearer {token}"))
             .header("content-type", "application/octet-stream")
             .body(axum::body::Body::from(body))
@@ -1636,7 +1180,7 @@ mod forkchoice_handler_tests {
 
         let req = axum::http::Request::builder()
             .method("POST")
-            .uri("/cancun/forkchoice")
+            .uri("/osaka/forkchoice")
             .header("authorization", format!("Bearer {token}"))
             .header("content-type", "application/octet-stream")
             .body(axum::body::Body::from(vec![0xFFu8; 10]))
@@ -1665,13 +1209,15 @@ mod forkchoice_handler_tests {
         use ethrex_blockchain::payload::{BuildPayloadArgs, create_payload};
         use ethrex_common::types::{DEFAULT_BUILDER_GAS_CEIL, ELASTICITY_MULTIPLIER};
         use ethrex_common::{H160, H256};
-        use ethrex_rpc::engine_rest::types::cancun::PayloadAttributes;
         use ethrex_rpc::engine_rest::types::common::Bytes20;
+        use ethrex_rpc::engine_rest::types::osaka::PayloadAttributes;
         use ethrex_storage::{EngineType, Store};
 
         // Genesis with Cancun active from 0 (Prague tip, no Osaka), matching the
         // JSON-RPC fork_choice tests — create_payload/build_payload produce a valid
         // block and the V3 attribute validator reaches the timestamp check.
+        // `/osaka/forkchoice` runs forkchoiceUpdatedV3 semantics, so the V3
+        // attribute validator (`is_cancun_activated` + timestamp) applies here.
         let genesis_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("fixtures/genesis/execution-api.json");
@@ -1716,7 +1262,7 @@ mod forkchoice_handler_tests {
         // head advances to block_1; attrs.timestamp == block_1.timestamp is stale
         // (the engine API requires strictly greater), so validation must reject
         // (422) instead of building a payload.
-        let update = CancunForkchoiceUpdate {
+        let update = OsakaForkchoiceUpdate {
             state: ForkchoiceState {
                 head_block_hash: hash_1.0,
                 safe_block_hash: genesis_header.hash().0,
@@ -1733,7 +1279,7 @@ mod forkchoice_handler_tests {
         let body = update.to_ssz();
         let req = axum::http::Request::builder()
             .method("POST")
-            .uri("/cancun/forkchoice")
+            .uri("/osaka/forkchoice")
             .header("authorization", format!("Bearer {token}"))
             .header("content-type", "application/octet-stream")
             .body(axum::body::Body::from(body))
@@ -1751,12 +1297,12 @@ mod end_to_end_tests {
     use super::test_helpers::auth_token;
     use bytes::Bytes;
     use ethrex_rpc::engine_rest::router;
-    use ethrex_rpc::engine_rest::types::built_payload::BuiltPayloadCancun;
-    use ethrex_rpc::engine_rest::types::cancun::PayloadAttributes;
+    use ethrex_rpc::engine_rest::types::built_payload::BuiltPayloadOsaka;
     use ethrex_rpc::engine_rest::types::common::{
         Bytes20, ForkchoiceResponse, ForkchoiceState, to_optional,
     };
-    use ethrex_rpc::engine_rest::types::forkchoice_update::CancunForkchoiceUpdate;
+    use ethrex_rpc::engine_rest::types::forkchoice_update::OsakaForkchoiceUpdate;
+    use ethrex_rpc::engine_rest::types::osaka::PayloadAttributes;
     use ethrex_rpc::test_utils::{
         add_eip1559_tx_blocks, default_context_with_storage, setup_store,
     };
@@ -1774,7 +1320,7 @@ mod end_to_end_tests {
     /// sub-project 4 alongside the measurement harness.
     #[tokio::test]
     #[ignore = "fixture infra deferred to sub-project 4"]
-    async fn cancun_build_then_get_payload_round_trip() {
+    async fn osaka_build_then_get_payload_round_trip() {
         let storage = setup_store().await;
         // Seed a small chain (3 blocks of EIP-1559 txs).
         add_eip1559_tx_blocks(&storage, 3, 2).await;
@@ -1795,8 +1341,8 @@ mod end_to_end_tests {
             .unwrap()
             .unwrap();
 
-        // POST /cancun/forkchoice with payload_attributes.
-        let update = CancunForkchoiceUpdate {
+        // POST /osaka/forkchoice with payload_attributes.
+        let update = OsakaForkchoiceUpdate {
             state: ForkchoiceState {
                 head_block_hash: head_hash.0,
                 safe_block_hash: head_hash.0,
@@ -1813,7 +1359,7 @@ mod end_to_end_tests {
         let body = update.to_ssz();
         let req = axum::http::Request::builder()
             .method("POST")
-            .uri("/cancun/forkchoice")
+            .uri("/osaka/forkchoice")
             .header("authorization", format!("Bearer {token}"))
             .header("content-type", "application/octet-stream")
             .body(axum::body::Body::from(body))
@@ -1826,17 +1372,17 @@ mod end_to_end_tests {
             .payload_id()
             .expect("payload_id should be Some when attrs provided");
 
-        // GET /cancun/payloads/{id} — verify the SSZ BuiltPayload decodes.
+        // GET /osaka/payloads/{id} — verify the SSZ BuiltPayload decodes.
         let req = axum::http::Request::builder()
             .method("GET")
-            .uri(format!("/cancun/payloads/{}", payload_id.to_hex_string()))
+            .uri(format!("/osaka/payloads/{}", payload_id.to_hex_string()))
             .header("authorization", format!("Bearer {token}"))
             .body(axum::body::Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
         let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let built = BuiltPayloadCancun::from_ssz_bytes(&body_bytes).unwrap();
+        let built = BuiltPayloadOsaka::from_ssz_bytes(&body_bytes).unwrap();
         assert!(!built.should_override_builder);
     }
 }
@@ -1886,26 +1432,13 @@ mod helpers_tests {
 }
 
 mod bodies_types_tests {
-    use ethrex_rpc::engine_rest::types::bodies::{
-        BodiesByHashRequest, BodyAmsterdam, BodyParis, BodyShanghai,
-    };
-    use ethrex_rpc::engine_rest::types::common::Bytes20;
-    use ethrex_rpc::engine_rest::types::shanghai::Withdrawal;
+    use ethrex_rpc::engine_rest::types::bodies::{BodiesByHashRequest, BodyAmsterdam, BodyOsaka};
+    use ethrex_rpc::engine_rest::types::common::{Bytes20, Withdrawal};
     use libssz::{SszDecode, SszEncode};
 
     #[test]
-    fn body_paris_roundtrips_empty() {
-        let body = BodyParis {
-            transactions: vec![].try_into().unwrap(),
-        };
-        let bytes = body.to_ssz();
-        let back = BodyParis::from_ssz_bytes(&bytes).unwrap();
-        assert_eq!(back, body);
-    }
-
-    #[test]
-    fn body_shanghai_roundtrips_with_withdrawals() {
-        let body = BodyShanghai {
+    fn body_osaka_roundtrips_with_withdrawals() {
+        let body = BodyOsaka {
             transactions: vec![vec![0xC0].try_into().unwrap()].try_into().unwrap(),
             withdrawals: vec![Withdrawal {
                 index: 1,
@@ -1917,7 +1450,7 @@ mod bodies_types_tests {
             .unwrap(),
         };
         let bytes = body.to_ssz();
-        let back = BodyShanghai::from_ssz_bytes(&bytes).unwrap();
+        let back = BodyOsaka::from_ssz_bytes(&bytes).unwrap();
         assert_eq!(back, body);
     }
 
@@ -1983,7 +1516,7 @@ mod bodies_by_hash_tests {
 
         let req = axum::http::Request::builder()
             .method("POST")
-            .uri("/cancun/bodies/hash")
+            .uri("/osaka/bodies/hash")
             .header("authorization", format!("Bearer {token}"))
             .header("content-type", "application/octet-stream")
             .body(axum::body::Body::from(body))
@@ -2017,7 +1550,7 @@ mod bodies_by_hash_tests {
 
         let req = axum::http::Request::builder()
             .method("POST")
-            .uri("/cancun/bodies/hash")
+            .uri("/osaka/bodies/hash")
             .header("authorization", format!("Bearer {token}"))
             // NO content-type
             .body(axum::body::Body::from(body))
@@ -2074,7 +1607,7 @@ mod bodies_by_range_tests {
 
         let req = axum::http::Request::builder()
             .method("GET")
-            .uri("/cancun/bodies?from=1&count=3")
+            .uri("/osaka/bodies?from=1&count=3")
             .header("authorization", format!("Bearer {token}"))
             .body(axum::body::Body::empty())
             .unwrap();
@@ -2097,7 +1630,7 @@ mod bodies_by_range_tests {
 
         let req = axum::http::Request::builder()
             .method("GET")
-            .uri("/cancun/bodies") // no from/count
+            .uri("/osaka/bodies") // no from/count
             .header("authorization", format!("Bearer {token}"))
             .body(axum::body::Body::empty())
             .unwrap();
@@ -2116,7 +1649,7 @@ mod bodies_by_range_tests {
 
         let req = axum::http::Request::builder()
             .method("GET")
-            .uri("/cancun/bodies?from=1&count=0")
+            .uri("/osaka/bodies?from=1&count=0")
             .header("authorization", format!("Bearer {token}"))
             .body(axum::body::Body::empty())
             .unwrap();
@@ -2135,7 +1668,7 @@ mod bodies_by_range_tests {
 
         let req = axum::http::Request::builder()
             .method("GET")
-            .uri("/cancun/bodies?from=1&count=129")
+            .uri("/osaka/bodies?from=1&count=129")
             .header("authorization", format!("Bearer {token}"))
             .body(axum::body::Body::empty())
             .unwrap();
@@ -2145,9 +1678,7 @@ mod bodies_by_range_tests {
 }
 
 mod blobs_types_tests {
-    use ethrex_rpc::engine_rest::types::blobs::{
-        BlobAndProofV1, BlobAndProofV2, BlobsRequestV4, BlobsV2Request,
-    };
+    use ethrex_rpc::engine_rest::types::blobs::{BlobAndProofV2, BlobsRequestV4, BlobsV2Request};
     use libssz::{SszDecode, SszEncode};
 
     #[test]
@@ -2180,17 +1711,6 @@ mod blobs_types_tests {
     }
 
     #[test]
-    fn blob_and_proof_v1_roundtrips() {
-        let v1 = BlobAndProofV1 {
-            blob: vec![0xAAu8; 131_072].try_into().unwrap(),
-            proof: [0xBB; 48],
-        };
-        let bytes = v1.to_ssz();
-        let back = BlobAndProofV1::from_ssz_bytes(&bytes).unwrap();
-        assert_eq!(back, v1);
-    }
-
-    #[test]
     fn blob_and_proof_v2_roundtrips_with_multiple_proofs() {
         let v2 = BlobAndProofV2 {
             blob: vec![0xAAu8; 131_072].try_into().unwrap(),
@@ -2199,25 +1719,6 @@ mod blobs_types_tests {
         let bytes = v2.to_ssz();
         let back = BlobAndProofV2::from_ssz_bytes(&bytes).unwrap();
         assert_eq!(back.proofs.len(), 2);
-    }
-
-    #[test]
-    fn blobs_v1_response_roundtrips_mixed_availability() {
-        use ethrex_rpc::engine_rest::types::blobs::{BlobV1Entry, BlobsV1Response};
-        let entries = vec![
-            BlobV1Entry::available(BlobAndProofV1 {
-                blob: vec![0x11u8; 131_072].try_into().unwrap(),
-                proof: [0x22; 48],
-            }),
-            BlobV1Entry::unavailable(),
-        ];
-        let resp = BlobsV1Response {
-            entries: entries.try_into().unwrap(),
-        };
-        let bytes = resp.to_ssz();
-        let back = BlobsV1Response::from_ssz_bytes(&bytes).unwrap();
-        assert_eq!(back, resp);
-        assert_eq!(back.entries.len(), 2);
     }
 
     #[test]
@@ -2247,74 +1748,6 @@ mod blobs_types_tests {
         let bytes = resp.to_ssz();
         let back = BlobsV4Response::from_ssz_bytes(&bytes).unwrap();
         assert_eq!(back, resp);
-    }
-}
-
-mod blobs_v1_tests {
-    use super::test_helpers::auth_token;
-    use bytes::Bytes;
-    use ethrex_rpc::engine_rest::router;
-    use ethrex_rpc::engine_rest::types::blobs::BlobsV1Request;
-    use ethrex_rpc::test_utils::{default_context_with_storage, setup_store};
-    use libssz::SszEncode;
-    use tower::ServiceExt;
-
-    /// The test genesis activates Osaka from timestamp 0, so the canonical head is
-    /// Osaka-era. `/blobs/v1` serves whole-blob proofs and is only valid pre-Osaka
-    /// (mirrors JSON-RPC `getBlobsV1`); post-Osaka it must reject with 400 rather
-    /// than return a `proofs[0]` that, for a cell-proof blob, would be a cell proof
-    /// and fail KZG verification at the CL. Pre-Osaka per-entry behavior is covered
-    /// by the v3 path.
-    #[tokio::test]
-    async fn post_osaka_returns_400_unsupported() {
-        let storage = setup_store().await;
-        let mut ctx = default_context_with_storage(storage).await;
-        let secret = Bytes::from(vec![0xAB; 32]);
-        ctx.node_data.jwt_secret = secret.clone();
-        let app = router(ctx);
-        let token = auth_token(&secret).await;
-
-        let req_body = BlobsV1Request {
-            versioned_hashes: vec![[0xFFu8; 32]].try_into().unwrap(),
-        };
-        let body = req_body.to_ssz();
-        let req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/blobs/v1")
-            .header("authorization", format!("Bearer {token}"))
-            .header("content-type", "application/octet-stream")
-            .body(axum::body::Body::from(body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), 400);
-        assert_eq!(
-            resp.headers().get("content-type").unwrap(),
-            "application/problem+json"
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_content_type_returns_415() {
-        let storage = setup_store().await;
-        let mut ctx = default_context_with_storage(storage).await;
-        let secret = Bytes::from(vec![0xAB; 32]);
-        ctx.node_data.jwt_secret = secret.clone();
-        let app = router(ctx);
-        let token = auth_token(&secret).await;
-
-        let req_body = BlobsV1Request {
-            versioned_hashes: vec![].try_into().unwrap(),
-        };
-        let body = req_body.to_ssz();
-        let req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/blobs/v1")
-            .header("authorization", format!("Bearer {token}"))
-            // NO content-type
-            .body(axum::body::Body::from(body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), 415);
     }
 }
 
@@ -2487,12 +1920,11 @@ mod sp3_smoke_tests {
         let checks: &[(&str, &str)] = &[
             ("GET", "/identity"),
             ("GET", "/capabilities"),
-            ("POST", "/cancun/payloads"),
-            ("GET", "/cancun/payloads/0x0102030405060708"),
-            ("POST", "/cancun/forkchoice"),
-            ("POST", "/cancun/bodies/hash"),
-            ("GET", "/cancun/bodies?from=1&count=1"),
-            ("POST", "/blobs/v1"),
+            ("POST", "/osaka/payloads"),
+            ("GET", "/osaka/payloads/0x0102030405060708"),
+            ("POST", "/osaka/forkchoice"),
+            ("POST", "/osaka/bodies/hash"),
+            ("GET", "/osaka/bodies?from=1&count=1"),
             ("POST", "/blobs/v2"),
             ("POST", "/blobs/v3"),
             ("POST", "/blobs/v4"),
@@ -2559,13 +1991,13 @@ mod forkchoice_update_type_tests {
     use ethrex_rpc::engine_rest::types::blobs::CELLS_PER_EXT_BLOB;
     use ethrex_rpc::engine_rest::types::common::{ForkchoiceState, from_optional, to_optional};
     use ethrex_rpc::engine_rest::types::forkchoice_update::*;
-    use ethrex_rpc::engine_rest::types::{amsterdam, cancun, paris};
+    use ethrex_rpc::engine_rest::types::{amsterdam, osaka};
     use libssz::{SszDecode, SszEncode};
     use libssz_types::SszBitvector;
 
     #[test]
-    fn paris_forkchoice_update_roundtrips_none_attrs() {
-        let update = ParisForkchoiceUpdate {
+    fn osaka_forkchoice_update_roundtrips_none_attrs() {
+        let update = OsakaForkchoiceUpdate {
             state: ForkchoiceState {
                 head_block_hash: [1; 32],
                 safe_block_hash: [2; 32],
@@ -2574,43 +2006,21 @@ mod forkchoice_update_type_tests {
             payload_attributes: to_optional(None),
         };
         let bytes = update.to_ssz();
-        let back = ParisForkchoiceUpdate::from_ssz_bytes(&bytes).unwrap();
+        let back = OsakaForkchoiceUpdate::from_ssz_bytes(&bytes).unwrap();
         assert_eq!(back, update);
         assert!(from_optional(&back.payload_attributes).is_none());
     }
 
     #[test]
-    fn paris_forkchoice_update_roundtrips_some_attrs() {
+    fn osaka_forkchoice_update_roundtrips_some_attrs() {
         use ethrex_rpc::engine_rest::types::common::Bytes20;
-        let update = ParisForkchoiceUpdate {
-            state: ForkchoiceState {
-                head_block_hash: [0xFF; 32],
-                safe_block_hash: [0; 32],
-                finalized_block_hash: [0; 32],
-            },
-            payload_attributes: to_optional(Some(paris::PayloadAttributes {
-                timestamp: 1_700_000_001,
-                prev_randao: [9; 32],
-                suggested_fee_recipient: Bytes20([10; 20]),
-            })),
-        };
-        let bytes = update.to_ssz();
-        let back = ParisForkchoiceUpdate::from_ssz_bytes(&bytes).unwrap();
-        assert_eq!(back, update);
-        let attrs = from_optional(&back.payload_attributes).unwrap();
-        assert_eq!(attrs.timestamp, 1_700_000_001);
-    }
-
-    #[test]
-    fn cancun_forkchoice_update_roundtrips_some_attrs() {
-        use ethrex_rpc::engine_rest::types::common::Bytes20;
-        let update = CancunForkchoiceUpdate {
+        let update = OsakaForkchoiceUpdate {
             state: ForkchoiceState {
                 head_block_hash: [0xAA; 32],
                 safe_block_hash: [0xBB; 32],
                 finalized_block_hash: [0xCC; 32],
             },
-            payload_attributes: to_optional(Some(cancun::PayloadAttributes {
+            payload_attributes: to_optional(Some(osaka::PayloadAttributes {
                 timestamp: 9_999,
                 prev_randao: [7; 32],
                 suggested_fee_recipient: Bytes20([8; 20]),
@@ -2619,13 +2029,15 @@ mod forkchoice_update_type_tests {
             })),
         };
         let bytes = update.to_ssz();
-        let back = CancunForkchoiceUpdate::from_ssz_bytes(&bytes).unwrap();
+        let back = OsakaForkchoiceUpdate::from_ssz_bytes(&bytes).unwrap();
         assert_eq!(back, update);
+        let attrs = from_optional(&back.payload_attributes).unwrap();
+        assert_eq!(attrs.timestamp, 9_999);
     }
 
     #[test]
     fn malformed_bytes_returns_error() {
-        let result = CancunForkchoiceUpdate::from_ssz_bytes(&[0u8; 10]);
+        let result = OsakaForkchoiceUpdate::from_ssz_bytes(&[0u8; 10]);
         assert!(result.is_err());
     }
 

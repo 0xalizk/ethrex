@@ -55,7 +55,7 @@ pub async fn latest_block(client: &Client, url: &str, token: &str) -> Result<(He
 }
 
 /// The fork's forkchoiceUpdated version and payload-attributes shape:
-/// V1 Paris, V2 +withdrawals, V3 +parentBeaconBlockRoot, V4 +slotNumber.
+/// V3 Osaka (withdrawals + parentBeaconBlockRoot), V4 Amsterdam (+slotNumber).
 pub fn fcu_method_and_attrs(
     fork: ForkArg,
     timestamp: u64,
@@ -67,12 +67,7 @@ pub fn fcu_method_and_attrs(
         "suggestedFeeRecipient": "0x0000000000000000000000000000000000000000",
     });
     let method = match fork {
-        ForkArg::Paris => "engine_forkchoiceUpdatedV1",
-        ForkArg::Shanghai => {
-            attrs["withdrawals"] = json!([]);
-            "engine_forkchoiceUpdatedV2"
-        }
-        ForkArg::Cancun | ForkArg::Prague | ForkArg::Osaka => {
+        ForkArg::Osaka => {
             attrs["withdrawals"] = json!([]);
             attrs["parentBeaconBlockRoot"] = json!(ZERO_HASH);
             "engine_forkchoiceUpdatedV3"
@@ -137,11 +132,10 @@ pub async fn acquire_payload_id(
     start_payload_build(client, url_base, &token, fork, &head, ts).await
 }
 
-/// Detect the fork era of an external node from its latest header fields
-/// (every post-merge header addition is optional-and-skipped in JSON), then
-/// disambiguate Prague vs Osaka — identical headers — by probing
-/// `engine_getPayloadV5` with a freshly built payload (V5 rejects Prague-era
-/// payloads with UnsupportedFork).
+/// Detect the fork era of an external node from its latest header fields. Only
+/// Fusaka (Osaka) onward is supported: Amsterdam adds `slotNumber` /
+/// `blockAccessListHash` to the header, so its presence identifies Amsterdam;
+/// everything else is treated as Osaka.
 pub async fn detect_fork(client: &Client, url: &str, secret: &[u8]) -> Result<ForkArg> {
     let token = crate::jwt::mint(secret)?;
     let (_, header) = latest_block(client, url, &token).await?;
@@ -149,31 +143,7 @@ pub async fn detect_fork(client: &Client, url: &str, secret: &[u8]) -> Result<Fo
     if header.get("slotNumber").is_some() || header.get("blockAccessListHash").is_some() {
         return Ok(ForkArg::Amsterdam);
     }
-    if header.get("requestsHash").is_some() {
-        let id = acquire_payload_id(client, url, secret, ForkArg::Prague)
-            .await
-            .context("Prague/Osaka disambiguation needs a payload build")?;
-        let resp =
-            json_rpc::call(client, url, &token, "engine_getPayloadV5", (id.as_str(),)).await?;
-        let v = resp
-            .json()
-            .ok_or_else(|| eyre!("engine_getPayloadV5: non-JSON response"))?;
-        let unsupported = v["error"]["message"]
-            .as_str()
-            .is_some_and(|m| m.to_lowercase().contains("unsupported"));
-        return Ok(if unsupported {
-            ForkArg::Prague
-        } else {
-            ForkArg::Osaka
-        });
-    }
-    if header.get("excessBlobGas").is_some() {
-        return Ok(ForkArg::Cancun);
-    }
-    if header.get("withdrawalsRoot").is_some() {
-        return Ok(ForkArg::Shanghai);
-    }
-    Ok(ForkArg::Paris)
+    Ok(ForkArg::Osaka)
 }
 
 /// Load newline-separated 0x-prefixed versioned hashes. Lines that are empty

@@ -4,10 +4,9 @@
 //! `BlobsV4Request` container (v4). Responses are bare `List[BlobV*Entry,
 //! MAX_BLOBS_REQUEST]` — NOT wrapped in a named container — matching the CL.
 //! Each entry carries an `available` boolean plus `contents`; when `available`
-//! is false the `contents` are zero-valued and CLs MUST ignore them. `/blobs/v1`
-//! (Cancun, pre-Osaka only) surfaces missing blobs as `available == false`
-//! entries. `/blobs/v2` is all-or-nothing (204 when any blob is missing);
-//! `/blobs/v3` surfaces missing blobs per entry.
+//! is false the `contents` are zero-valued and CLs MUST ignore them. `/blobs/v2`
+//! is all-or-nothing (204 when any blob is missing); `/blobs/v3` surfaces missing
+//! blobs per entry.
 
 use libssz_derive::{HashTreeRoot, SszDecode, SszEncode};
 use libssz_types::{SszBitvector, SszList, SszVector};
@@ -29,18 +28,12 @@ pub const MAX_BLOBS_REQUEST: usize = 128;
 
 // ── Requests ──────────────────────────────────────────────────────────────────
 
-/// Inner versioned-hash list wrapped by the v1/v2/v3 request containers.
+/// Inner versioned-hash list wrapped by the v2/v3 request containers.
 pub type VersionedHashList = SszList<[u8; 32], MAX_BLOBS_REQUEST>;
 
-/// `/blobs/v1` request. Per execution-apis #793 the request is a single-field
-/// SSZ **container** wrapping the list (a 4-byte offset precedes the hashes on
-/// the wire), NOT a bare top-level list.
-#[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
-pub struct BlobsV1Request {
-    pub versioned_hashes: VersionedHashList,
-}
-
-/// `/blobs/v2` and `/blobs/v3` request — same single-field container as v1.
+/// `/blobs/v2` and `/blobs/v3` request. Per execution-apis #793 the request is a
+/// single-field SSZ **container** wrapping the list (a 4-byte offset precedes the
+/// hashes on the wire), NOT a bare top-level list.
 #[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
 pub struct BlobsV2Request {
     pub versioned_hashes: VersionedHashList,
@@ -56,30 +49,11 @@ pub struct BlobsRequestV4 {
 
 // ── BlobAndProof leaf types ───────────────────────────────────────────────────
 
-/// `/blobs/v1` contents: whole blob + single KZG proof (Cancun).
-#[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
-pub struct BlobAndProofV1 {
-    pub blob: SszVector<u8, BYTES_PER_BLOB>,
-    pub proof: [u8; BYTES_PER_PROOF],
-}
-
 /// `/blobs/v2` and `/blobs/v3` contents: whole blob + cell proofs (Osaka).
 #[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
 pub struct BlobAndProofV2 {
     pub blob: SszVector<u8, BYTES_PER_BLOB>,
     pub proofs: SszList<[u8; BYTES_PER_PROOF], CELLS_PER_EXT_BLOB>,
-}
-
-impl BlobAndProofV1 {
-    /// A zero-valued instance used as the `contents` of an unavailable entry.
-    pub fn zeroed() -> Self {
-        BlobAndProofV1 {
-            blob: vec![0u8; BYTES_PER_BLOB]
-                .try_into()
-                .expect("BYTES_PER_BLOB zero blob fits SszVector"),
-            proof: [0u8; BYTES_PER_PROOF],
-        }
-    }
 }
 
 impl BlobAndProofV2 {
@@ -96,34 +70,11 @@ impl BlobAndProofV2 {
 
 // ── Entry types ───────────────────────────────────────────────────────────────
 
-/// `/blobs/v1` response entry. When `available` is false, `contents` is zeroed
-/// and CLs MUST ignore it.
-#[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
-pub struct BlobV1Entry {
-    pub available: bool,
-    pub contents: BlobAndProofV1,
-}
-
 /// `/blobs/v2` and `/blobs/v3` response entry.
 #[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
 pub struct BlobV2Entry {
     pub available: bool,
     pub contents: BlobAndProofV2,
-}
-
-impl BlobV1Entry {
-    pub fn available(contents: BlobAndProofV1) -> Self {
-        BlobV1Entry {
-            available: true,
-            contents,
-        }
-    }
-    pub fn unavailable() -> Self {
-        BlobV1Entry {
-            available: false,
-            contents: BlobAndProofV1::zeroed(),
-        }
-    }
 }
 
 impl BlobV2Entry {
@@ -143,11 +94,6 @@ impl BlobV2Entry {
 
 // ── Response containers (single-field, per execution-apis #793) ───────────────
 
-/// `/blobs/v1` response: `{ entries: List[BlobV1Entry, N] }`.
-#[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
-pub struct BlobsV1Response {
-    pub entries: SszList<BlobV1Entry, MAX_BLOBS_REQUEST>,
-}
 /// `/blobs/v2` response (all-or-nothing; every entry is `available`).
 #[derive(Debug, Clone, PartialEq, Eq, SszEncode, SszDecode, HashTreeRoot)]
 pub struct BlobsV2Response {

@@ -33,7 +33,7 @@ pub(crate) const CONTENT_TYPE_OCTET_STREAM: &str = "application/octet-stream";
 ///   POST /{fork}/forkchoice
 ///   POST /{fork}/bodies/hash
 ///   GET  /{fork}/bodies
-///   POST /blobs/v{1..4}
+///   POST /blobs/v{2..4}
 pub fn router(ctx: RpcApiContext) -> Router {
     let secret = ctx.node_data.jwt_secret.clone();
     let client_version: ClientVersion = ctx.node_data.client_version.clone();
@@ -64,7 +64,6 @@ pub fn router(ctx: RpcApiContext) -> Router {
             post(handlers::bodies::bodies_by_hash),
         )
         .route("/{fork}/bodies", get(handlers::bodies::bodies_by_range))
-        .route("/blobs/v1", post(handlers::blobs::blobs_v1))
         .route("/blobs/v2", post(handlers::blobs::blobs_v2))
         .route("/blobs/v3", post(handlers::blobs::blobs_v3))
         .route("/blobs/v4", post(handlers::blobs::blobs_v4))

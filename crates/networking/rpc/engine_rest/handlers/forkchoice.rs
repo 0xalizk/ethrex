@@ -10,8 +10,7 @@ use ethrex_common::{Address, H256};
 use tracing::{error, info};
 
 use crate::engine::fork_choice::{
-    handle_forkchoice, validate_attributes_v1, validate_attributes_v2,
-    validate_attributes_v2_pre_shanghai, validate_attributes_v3, validate_attributes_v4,
+    handle_forkchoice, validate_attributes_v3, validate_attributes_v4,
 };
 use crate::engine_rest::error::ProblemJson;
 use crate::engine_rest::extractors::{decode_ssz, is_length_limit_error};
@@ -23,8 +22,7 @@ use crate::engine_rest::types::common::{
     PayloadStatusCode, from_optional,
 };
 use crate::engine_rest::types::forkchoice_update::{
-    AmsterdamForkchoiceUpdate, CancunForkchoiceUpdate, ParisForkchoiceUpdate,
-    PragueForkchoiceUpdate, ShanghaiForkchoiceUpdate,
+    AmsterdamForkchoiceUpdate, OsakaForkchoiceUpdate,
 };
 use crate::rpc::RpcApiContext;
 use crate::types::fork_choice::{ForkChoiceState, PayloadAttributesV3, PayloadAttributesV4};
@@ -33,7 +31,7 @@ use crate::utils::RpcErr;
 
 /// Internal payload-attributes representation after fork-specific field mapping.
 enum AttrsInternal {
-    /// Paris / Shanghai / Cancun / Prague / Osaka → engine_forkchoiceUpdatedV{1..3}.
+    /// Osaka → engine_forkchoiceUpdatedV3.
     V3(PayloadAttributesV3),
     /// Amsterdam → engine_forkchoiceUpdatedV4.
     V4(PayloadAttributesV4),
@@ -62,51 +60,14 @@ pub async fn forkchoice_update(
     };
 
     match fork {
-        Fork::Paris => {
-            let update = match decode_ssz::<ParisForkchoiceUpdate>(&body) {
-                Ok(u) => u,
-                Err(p) => return p.into_response(),
-            };
-            let attrs = from_optional(&update.payload_attributes)
-                .map(|a| AttrsInternal::V3(paris_to_v3(a)));
-            run_forkchoice(update.state, attrs, ctx, 1).await
-        }
-        Fork::Shanghai => {
-            let update = match decode_ssz::<ShanghaiForkchoiceUpdate>(&body) {
-                Ok(u) => u,
-                Err(p) => return p.into_response(),
-            };
-            let attrs = from_optional(&update.payload_attributes)
-                .map(|a| AttrsInternal::V3(shanghai_to_v3(a)));
-            run_forkchoice(update.state, attrs, ctx, 2).await
-        }
-        Fork::Cancun => {
-            let update = match decode_ssz::<CancunForkchoiceUpdate>(&body) {
-                Ok(u) => u,
-                Err(p) => return p.into_response(),
-            };
-            let attrs = from_optional(&update.payload_attributes)
-                .map(|a| AttrsInternal::V3(cancun_to_v3(a)));
-            run_forkchoice(update.state, attrs, ctx, 3).await
-        }
-        Fork::Prague => {
-            let update = match decode_ssz::<PragueForkchoiceUpdate>(&body) {
-                Ok(u) => u,
-                Err(p) => return p.into_response(),
-            };
-            let attrs = from_optional(&update.payload_attributes)
-                .map(|a| AttrsInternal::V3(prague_to_v3(a)));
-            // Prague uses forkchoiceUpdatedV3 semantics in the JSON-RPC layer.
-            run_forkchoice(update.state, attrs, ctx, 3).await
-        }
         Fork::Osaka => {
-            // Osaka uses the same payload shape as Prague.
-            let update = match decode_ssz::<PragueForkchoiceUpdate>(&body) {
+            let update = match decode_ssz::<OsakaForkchoiceUpdate>(&body) {
                 Ok(u) => u,
                 Err(p) => return p.into_response(),
             };
             let attrs = from_optional(&update.payload_attributes)
-                .map(|a| AttrsInternal::V3(prague_to_v3(a)));
+                .map(|a| AttrsInternal::V3(osaka_to_v3(a)));
+            // Osaka uses forkchoiceUpdatedV3 semantics in the JSON-RPC layer.
             run_forkchoice(update.state, attrs, ctx, 3).await
         }
         Fork::Amsterdam => {
@@ -120,13 +81,13 @@ pub async fn forkchoice_update(
         }
         // Unreachable: ForkPath's parse_fork_segment rejects all non-spec forks
         // with 400 before the handler runs.
-        _ => unreachable!("ForkPath extractor restricts to the 6 spec forks"),
+        _ => unreachable!("ForkPath extractor restricts to the osaka/amsterdam forks"),
     }
 }
 
 // ── Fork-specific PayloadAttributes → internal conversion ────────────────────
 
-fn withdrawals_from_ssz(ws: &[crate::engine_rest::types::shanghai::Withdrawal]) -> Vec<Withdrawal> {
+fn withdrawals_from_ssz(ws: &[crate::engine_rest::types::common::Withdrawal]) -> Vec<Withdrawal> {
     ws.iter()
         .map(|w| Withdrawal {
             index: w.index,
@@ -137,39 +98,7 @@ fn withdrawals_from_ssz(ws: &[crate::engine_rest::types::shanghai::Withdrawal]) 
         .collect()
 }
 
-fn paris_to_v3(a: crate::engine_rest::types::paris::PayloadAttributes) -> PayloadAttributesV3 {
-    PayloadAttributesV3 {
-        timestamp: a.timestamp,
-        prev_randao: H256::from(a.prev_randao),
-        suggested_fee_recipient: Address::from(a.suggested_fee_recipient.0),
-        withdrawals: None,
-        parent_beacon_block_root: None,
-    }
-}
-
-fn shanghai_to_v3(
-    a: crate::engine_rest::types::shanghai::PayloadAttributes,
-) -> PayloadAttributesV3 {
-    PayloadAttributesV3 {
-        timestamp: a.timestamp,
-        prev_randao: H256::from(a.prev_randao),
-        suggested_fee_recipient: Address::from(a.suggested_fee_recipient.0),
-        withdrawals: Some(withdrawals_from_ssz(&a.withdrawals)),
-        parent_beacon_block_root: None,
-    }
-}
-
-fn cancun_to_v3(a: crate::engine_rest::types::cancun::PayloadAttributes) -> PayloadAttributesV3 {
-    PayloadAttributesV3 {
-        timestamp: a.timestamp,
-        prev_randao: H256::from(a.prev_randao),
-        suggested_fee_recipient: Address::from(a.suggested_fee_recipient.0),
-        withdrawals: Some(withdrawals_from_ssz(&a.withdrawals)),
-        parent_beacon_block_root: Some(H256::from(a.parent_beacon_block_root)),
-    }
-}
-
-fn prague_to_v3(a: crate::engine_rest::types::prague::PayloadAttributes) -> PayloadAttributesV3 {
+fn osaka_to_v3(a: crate::engine_rest::types::osaka::PayloadAttributes) -> PayloadAttributesV3 {
     PayloadAttributesV3 {
         timestamp: a.timestamp,
         prev_randao: H256::from(a.prev_randao),
@@ -233,7 +162,7 @@ fn rpc_err_to_problem(err: RpcErr) -> ProblemJson {
 
 // ── Payload-attributes validation ────────────────────────────────────────────
 //
-// Mirrors the per-version checks in the JSON-RPC `ForkChoiceUpdatedV{1..4}`
+// Mirrors the per-version checks in the JSON-RPC `ForkChoiceUpdatedV3`/`V4`
 // handlers (engine/fork_choice.rs): timestamp must advance past the head, the
 // withdrawals/parent_beacon_block_root fields must match the fork, and the
 // attributes version must match the head's fork era. `version` is pinned by the
@@ -247,27 +176,7 @@ fn validate_rest_attributes(
     head_block: &BlockHeader,
     ctx: &RpcApiContext,
 ) -> Result<(), RpcErr> {
-    let chain_config = ctx.storage.get_chain_config();
     match (version, attrs) {
-        (1, AttrsInternal::V3(a)) => {
-            if chain_config.is_cancun_activated(a.timestamp) {
-                return Err(RpcErr::UnsupportedFork(
-                    "forkchoice paris endpoint used to build Cancun payload".to_string(),
-                ));
-            }
-            validate_attributes_v1(a, head_block)
-        }
-        (2, AttrsInternal::V3(a)) => {
-            if chain_config.is_cancun_activated(a.timestamp) {
-                Err(RpcErr::UnsupportedFork(
-                    "forkchoice shanghai endpoint used to build Cancun payload".to_string(),
-                ))
-            } else if chain_config.is_shanghai_activated(a.timestamp) {
-                validate_attributes_v2(a, head_block)
-            } else {
-                validate_attributes_v2_pre_shanghai(a, head_block)
-            }
-        }
         (3, AttrsInternal::V3(a)) => validate_attributes_v3(a, head_block, ctx),
         (4, AttrsInternal::V4(a)) => validate_attributes_v4(a, head_block, ctx),
         // The (version, attrs-variant) pairing is fixed by the caller's per-fork

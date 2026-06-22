@@ -1,14 +1,11 @@
-//! Engine REST/SSZ vs JSON-RPC microbenchmarks — all fork eras
-//! (Paris → Amsterdam) and all endpoint versions.
+//! Engine REST/SSZ vs JSON-RPC microbenchmarks — the Fusaka-era forks
+//! (Osaka and Amsterdam) and their endpoint versions.
 //!
 //! Measures pure serde cost (encode/decode) of the engine API wire formats.
 //! Transport-level comparison (HTTP, auth, server handling) lives in
 //! `tooling/engine_bench`.
 //!
 //! Notes on coverage:
-//! - Prague's newPayload wire shape is identical to Osaka's (`prague::Envelope`
-//!   serves both), so only the Osaka group exists for newPayload; Prague gets
-//!   its own getPayload group (V4: `BlobsBundleV1` + requests).
 //! - blobs v2 and v3 share the hit-path shape; v3 additionally gets an
 //!   all-miss group (its zero-padded miss entries are the pathological case).
 //! - `/blobs/v4` has no JSON counterpart and production answers 204, so it is
@@ -22,12 +19,11 @@ mod fixtures;
 use criterion::{
     BenchmarkId, Criterion, SamplingMode, Throughput, black_box, criterion_group, criterion_main,
 };
-use fixtures::PayloadEra;
 use libssz::{SszDecode, SszEncode};
 
-/// Tx counts for the newPayload scaling sweep (Osaka group only; other eras
-/// use the 150-tx point). 150 × 200 B ≈ 30 KB of tx data is a small-to-mid
-/// mainnet payload; 500 approximates a busy block.
+/// Tx counts for the newPayload scaling sweep (Osaka group). 150 × 200 B ≈
+/// 30 KB of tx data is a small-to-mid mainnet payload; 500 approximates a
+/// busy block.
 const NEWPAYLOAD_TX_COUNTS: [usize; 3] = [10, 150, 500];
 
 /// Hex-string → fixed byte array, shaped like the production hex deserializers
@@ -69,16 +65,6 @@ where
 /// JSON-decode mirrors of the Serialize-only production blob types (the server
 /// sends blobs, never parses them — a CL does). They give the blobs groups a
 /// JSON decode baseline to compare against `decode_ssz`.
-#[derive(serde::Deserialize)]
-struct BlobAndProofV1Mirror {
-    #[serde(deserialize_with = "hex_array")]
-    #[allow(dead_code)]
-    blob: [u8; ethrex_rpc::engine_rest::types::blobs::BYTES_PER_BLOB],
-    #[serde(deserialize_with = "hex_array")]
-    #[allow(dead_code)]
-    proof: [u8; ethrex_rpc::engine_rest::types::blobs::BYTES_PER_PROOF],
-}
-
 #[derive(serde::Deserialize)]
 struct BlobAndProofV2Mirror {
     #[serde(deserialize_with = "hex_array")]
@@ -190,55 +176,12 @@ macro_rules! newpayload_group {
 
 // ── newPayload ────────────────────────────────────────────────────────────────
 
-fn newpayload_paris_bench(c: &mut Criterion) {
-    newpayload_group!(
-        c,
-        "newPayload_paris",
-        fixtures::payload_json(
-            fixtures::DEFAULT_SEED,
-            fixtures::DEFAULT_TX_COUNT,
-            PayloadEra::Paris
-        ),
-        fixtures::paris_newpayload_ssz(fixtures::DEFAULT_SEED, fixtures::DEFAULT_TX_COUNT),
-        ethrex_rpc::engine_rest::types::paris::ExecutionPayloadEnvelope
-    );
-}
-
-fn newpayload_shanghai_bench(c: &mut Criterion) {
-    newpayload_group!(
-        c,
-        "newPayload_shanghai",
-        fixtures::payload_json(
-            fixtures::DEFAULT_SEED,
-            fixtures::DEFAULT_TX_COUNT,
-            PayloadEra::Shanghai
-        ),
-        fixtures::shanghai_newpayload_ssz(fixtures::DEFAULT_SEED, fixtures::DEFAULT_TX_COUNT),
-        ethrex_rpc::engine_rest::types::shanghai::ExecutionPayloadEnvelope
-    );
-}
-
-fn newpayload_cancun_bench(c: &mut Criterion) {
-    newpayload_group!(
-        c,
-        "newPayload_cancun",
-        fixtures::payload_json(
-            fixtures::DEFAULT_SEED,
-            fixtures::DEFAULT_TX_COUNT,
-            PayloadEra::Cancun
-        ),
-        fixtures::cancun_newpayload_ssz(fixtures::DEFAULT_SEED, fixtures::DEFAULT_TX_COUNT),
-        ethrex_rpc::engine_rest::types::cancun::ExecutionPayloadEnvelope
-    );
-}
-
-/// Osaka newPayload, swept over tx counts. The wire shape (`prague::Envelope`)
-/// also serves Prague, so this group covers both eras.
+/// Osaka newPayload, swept over tx counts.
 fn newpayload_osaka_bench(c: &mut Criterion) {
     let mut g = c.benchmark_group("newPayload_osaka");
     for tx_count in NEWPAYLOAD_TX_COUNTS {
-        let json = fixtures::payload_json(fixtures::DEFAULT_SEED, tx_count, PayloadEra::Cancun);
-        let ssz = fixtures::prague_newpayload_ssz(fixtures::DEFAULT_SEED, tx_count);
+        let json = fixtures::payload_json(fixtures::DEFAULT_SEED, tx_count);
+        let ssz = fixtures::osaka_newpayload_ssz(fixtures::DEFAULT_SEED, tx_count);
 
         let json_bytes = serde_json::to_vec(&json).unwrap();
         let ssz_bytes = ssz.to_ssz();
@@ -280,7 +223,7 @@ fn newpayload_osaka_bench(c: &mut Criterion) {
         g.bench_function(BenchmarkId::new("decode_ssz", tx_count), |b| {
             b.iter(|| {
                 let p =
-                    ethrex_rpc::engine_rest::types::prague::ExecutionPayloadEnvelope::from_ssz_bytes(
+                    ethrex_rpc::engine_rest::types::osaka::ExecutionPayloadEnvelope::from_ssz_bytes(
                         &ssz_bytes,
                     )
                     .unwrap();
@@ -313,79 +256,6 @@ fn newpayload_amsterdam_bench(c: &mut Criterion) {
 }
 
 // ── getPayload ────────────────────────────────────────────────────────────────
-
-fn getpayload_paris_bench(c: &mut Criterion) {
-    transport_group!(
-        c,
-        "getPayload_paris",
-        fixtures::getpayload_response_json_paris(
-            fixtures::DEFAULT_SEED,
-            fixtures::DEFAULT_TX_COUNT
-        ),
-        ethrex_rpc::types::payload::ExecutionPayload,
-        fixtures::getpayload_response_ssz_paris(fixtures::DEFAULT_SEED, fixtures::DEFAULT_TX_COUNT),
-        ethrex_rpc::engine_rest::types::built_payload::BuiltPayloadParis
-    );
-}
-
-fn getpayload_shanghai_bench(c: &mut Criterion) {
-    transport_group!(
-        c,
-        "getPayload_shanghai",
-        fixtures::getpayload_response_json_shanghai(
-            fixtures::DEFAULT_SEED,
-            fixtures::DEFAULT_TX_COUNT
-        ),
-        ethrex_rpc::types::payload::ExecutionPayloadResponse,
-        fixtures::getpayload_response_ssz_shanghai(
-            fixtures::DEFAULT_SEED,
-            fixtures::DEFAULT_TX_COUNT
-        ),
-        ethrex_rpc::engine_rest::types::built_payload::BuiltPayloadShanghai
-    );
-}
-
-fn getpayload_cancun_bench(c: &mut Criterion) {
-    transport_group!(
-        c,
-        "getPayload_cancun",
-        fixtures::getpayload_response_json_cancun(
-            fixtures::DEFAULT_SEED,
-            fixtures::DEFAULT_TX_COUNT,
-            fixtures::DEFAULT_BUNDLE_BLOB_COUNT
-        ),
-        ethrex_rpc::types::payload::ExecutionPayloadResponse,
-        fixtures::getpayload_response_ssz_cancun(
-            fixtures::DEFAULT_SEED,
-            fixtures::DEFAULT_TX_COUNT,
-            fixtures::DEFAULT_BUNDLE_BLOB_COUNT
-        ),
-        ethrex_rpc::engine_rest::types::built_payload::BuiltPayloadCancun,
-        cfg: sampling_mode = SamplingMode::Flat,
-        cfg: sample_size = 30
-    );
-}
-
-fn getpayload_prague_bench(c: &mut Criterion) {
-    transport_group!(
-        c,
-        "getPayload_prague",
-        fixtures::getpayload_response_json_prague(
-            fixtures::DEFAULT_SEED,
-            fixtures::DEFAULT_TX_COUNT,
-            fixtures::DEFAULT_BUNDLE_BLOB_COUNT
-        ),
-        ethrex_rpc::types::payload::ExecutionPayloadResponse,
-        fixtures::getpayload_response_ssz_prague(
-            fixtures::DEFAULT_SEED,
-            fixtures::DEFAULT_TX_COUNT,
-            fixtures::DEFAULT_BUNDLE_BLOB_COUNT
-        ),
-        ethrex_rpc::engine_rest::types::built_payload::BuiltPayloadPrague,
-        cfg: sampling_mode = SamplingMode::Flat,
-        cfg: sample_size = 30
-    );
-}
 
 fn getpayload_osaka_bench(c: &mut Criterion) {
     transport_group!(
@@ -432,33 +302,6 @@ fn getpayload_amsterdam_bench(c: &mut Criterion) {
 }
 
 // ── blobs ─────────────────────────────────────────────────────────────────────
-
-fn blobs_v1_bench(c: &mut Criterion) {
-    transport_group!(
-        c,
-        "blobs_v1",
-        fixtures::blobs_v1_response_json(fixtures::DEFAULT_SEED, fixtures::DEFAULT_BLOB_REQUEST_COUNT),
-        Vec<Option<BlobAndProofV1Mirror>>,
-        fixtures::blobs_v1_response_ssz(fixtures::DEFAULT_SEED, fixtures::DEFAULT_BLOB_REQUEST_COUNT),
-        ethrex_rpc::engine_rest::types::blobs::BlobsV1Response,
-        cfg: sampling_mode = SamplingMode::Flat,
-        cfg: sample_size = 10
-    );
-}
-
-/// v1 all-miss: like v3, missed entries are zero-padded to full blob size.
-fn blobs_v1_miss_bench(c: &mut Criterion) {
-    transport_group!(
-        c,
-        "blobs_v1_miss",
-        fixtures::blobs_v1_response_json_allmiss(fixtures::DEFAULT_BLOB_REQUEST_COUNT),
-        Vec<Option<BlobAndProofV1Mirror>>,
-        fixtures::blobs_v1_response_ssz_allmiss(fixtures::DEFAULT_BLOB_REQUEST_COUNT),
-        ethrex_rpc::engine_rest::types::blobs::BlobsV1Response,
-        cfg: sampling_mode = SamplingMode::Flat,
-        cfg: sample_size = 10
-    );
-}
 
 /// Hit path for v2 AND v3 (identical shape: blob + 128 cell proofs).
 fn blobs_v2_bench(c: &mut Criterion) {
@@ -521,29 +364,17 @@ fn blobs_v4_ssz_bench(c: &mut Criterion) {
 
 // ── bodies ────────────────────────────────────────────────────────────────────
 
-fn bodies_paris_bench(c: &mut Criterion) {
+/// The Osaka body shape serves the osaka REST paths and the JSON
+/// `…BodiesByRangeV1` method.
+fn bodies_osaka_bench(c: &mut Criterion) {
     let n = fixtures::DEFAULT_BODIES_COUNT as usize;
     transport_group!(
         c,
-        "bodies_paris",
-        fixtures::bodies_range_json(fixtures::DEFAULT_SEED, n, 5, false),
-        Vec<Option<ethrex_rpc::types::payload::ExecutionPayloadBody>>,
-        fixtures::bodies_range_ssz_paris(fixtures::DEFAULT_SEED, n, 5),
-        ethrex_rpc::engine_rest::types::bodies::BodiesResponseParis
-    );
-}
-
-/// The Shanghai body shape serves the shanghai → osaka REST paths and the
-/// JSON `…BodiesByRangeV1` method.
-fn bodies_shanghai_bench(c: &mut Criterion) {
-    let n = fixtures::DEFAULT_BODIES_COUNT as usize;
-    transport_group!(
-        c,
-        "bodies_shanghai",
+        "bodies_osaka",
         fixtures::bodies_range_json(fixtures::DEFAULT_SEED, n, 5, true),
         Vec<Option<ethrex_rpc::types::payload::ExecutionPayloadBody>>,
-        fixtures::bodies_range_ssz_shanghai(fixtures::DEFAULT_SEED, n, 5),
-        ethrex_rpc::engine_rest::types::bodies::BodiesResponseShanghai
+        fixtures::bodies_range_ssz_osaka(fixtures::DEFAULT_SEED, n, 5),
+        ethrex_rpc::engine_rest::types::bodies::BodiesResponseOsaka
     );
 }
 
@@ -571,24 +402,14 @@ fn bodies_amsterdam_bench(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    newpayload_paris_bench,
-    newpayload_shanghai_bench,
-    newpayload_cancun_bench,
     newpayload_osaka_bench,
     newpayload_amsterdam_bench,
-    getpayload_paris_bench,
-    getpayload_shanghai_bench,
-    getpayload_cancun_bench,
-    getpayload_prague_bench,
     getpayload_osaka_bench,
     getpayload_amsterdam_bench,
-    blobs_v1_bench,
-    blobs_v1_miss_bench,
     blobs_v2_bench,
     blobs_v3_miss_bench,
     blobs_v4_ssz_bench,
-    bodies_paris_bench,
-    bodies_shanghai_bench,
+    bodies_osaka_bench,
     bodies_amsterdam_bench,
 );
 criterion_main!(benches);

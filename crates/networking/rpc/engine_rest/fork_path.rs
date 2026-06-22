@@ -1,10 +1,10 @@
 //! Fork path-segment extractor for `/{fork}/...` engine REST routes.
 //!
-//! Maps the URL path segment ("paris" .. "amsterdam") to `ethrex_common::types::Fork`.
-//! Any segment not in the engine REST spec's fork table is rejected with
-//! `400 Bad Request` — this covers both pre-Merge forks (Frontier..London) and
-//! forks that have no REST routes of their own (e.g. the BPO forks that sit
-//! between Osaka and Amsterdam).
+//! Maps the URL path segment ("osaka" / "amsterdam") to `ethrex_common::types::Fork`.
+//! Any other segment is rejected with `400 Bad Request`. ethrex's engine REST API
+//! serves only Fusaka (Osaka) onward — pre-Fusaka forks (Paris..Prague) are
+//! intentionally unsupported, as is any fork with no REST routes of its own (e.g.
+//! the BPO forks that sit between Osaka and Amsterdam).
 
 use axum::extract::{FromRequestParts, Path};
 use axum::http::request::Parts;
@@ -15,10 +15,6 @@ use crate::engine_rest::error::ProblemJson;
 /// Parse a URL fork segment into a `Fork`.
 pub fn parse_fork_segment(s: &str) -> Result<Fork, ProblemJson> {
     let fork = match s {
-        "paris" => Fork::Paris,
-        "shanghai" => Fork::Shanghai,
-        "cancun" => Fork::Cancun,
-        "prague" => Fork::Prague,
         "osaka" => Fork::Osaka,
         "amsterdam" => Fork::Amsterdam,
         _ => {
