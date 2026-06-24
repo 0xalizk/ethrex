@@ -571,6 +571,55 @@ pub enum Subcommand {
         )]
         at_block: u64,
     },
+    #[command(
+        name = "seed-head",
+        about = "Seed a canonical head block header onto a migrated datadir so the node can boot"
+    )]
+    SeedHead {
+        #[arg(
+            required = true,
+            value_name = "BLOCK_JSON",
+            help = "Path to a JSON file with an eth_getBlockByNumber result for the head block"
+        )]
+        block_json: String,
+        #[arg(
+            long = "state-root",
+            required = true,
+            value_name = "BINARY_STATE_ROOT",
+            help = "Binary trie state root to set in the seeded header (the migrate output root)"
+        )]
+        state_root: String,
+    },
+    #[command(
+        name = "seed-code",
+        about = "Populate ACCOUNT_CODES from a geth code export (post-migrate) so code reads work"
+    )]
+    SeedCode {
+        #[arg(
+            required = true,
+            value_name = "CODE_FILE",
+            help = "Path to the geth code export (same file passed to `migrate --code`)"
+        )]
+        code_path: String,
+    },
+    #[command(
+        name = "catch-up",
+        about = "Re-execute mainnet blocks from the migrated checkpoint up to a target, pulling them from a local node"
+    )]
+    CatchUp {
+        #[arg(
+            required = true,
+            value_name = "RPC_URL",
+            help = "JSON-RPC URL of a local mainnet node to pull blocks from (e.g. http://127.0.0.1:8545)"
+        )]
+        rpc_url: String,
+        #[arg(
+            long = "to",
+            value_name = "BLOCK",
+            help = "Target block number to catch up to. Defaults to the remote node's tip."
+        )]
+        to: Option<u64>,
+    },
     #[cfg(feature = "l2")]
     #[command(name = "l2")]
     L2(crate::l2::L2Command),
@@ -699,6 +748,19 @@ impl Subcommand {
                     at_block,
                 )
                 .await?;
+            }
+            Subcommand::SeedHead {
+                block_json,
+                state_root,
+            } => {
+                crate::migrate::seed_head(&effective_datadir, &block_json, &state_root).await?;
+            }
+            Subcommand::SeedCode { code_path } => {
+                crate::migrate::seed_code(&effective_datadir, &code_path).await?;
+            }
+            Subcommand::CatchUp { rpc_url, to } => {
+                let genesis = network.get_genesis()?;
+                crate::migrate::catch_up(&effective_datadir, genesis, &rpc_url, to).await?;
             }
             #[cfg(feature = "l2")]
             Subcommand::L2(command) => command.run().await?,

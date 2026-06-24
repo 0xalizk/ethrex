@@ -23,7 +23,13 @@ use ethrex_storage::{
 };
 
 use crate::bulk_builder::BulkTrieBuilder;
-use crate::initializers::init_store;
+use crate::initializers::{
+    init_binary_trie_state, init_blockchain, init_store, open_store, regenerate_head_state,
+};
+use ethrex_blockchain::{BlockchainOptions, BlockchainType};
+use ethrex_common::types::{Block, BlockBody, BlockHeader, Code};
+use ethrex_rpc::clients::eth::EthClient;
+use ethrex_rpc::types::block_identifier::BlockIdentifier;
 
 struct MigrateConfig {
     in_memory: bool,
@@ -195,6 +201,221 @@ pub async fn migrate_with_preimages(
     store.drop_cf(MIGRATION_TEMP)?;
     info!("Migration complete.");
 
+    Ok(())
+}
+
+/// Seed a canonical head block header onto a datadir produced by `migrate`.
+///
+/// `migrate` writes the binary-trie state and the latest block *number*, but not a block
+/// *header* for that number, so the node cannot establish a head and refuses to boot
+/// (`add_initial_state` -> MissingLatestBlockNumber). This takes the head block's
+/// `eth_getBlockByNumber` JSON, swaps in the binary-trie state root (the migrated checkpoint
+/// root), and stores it as the canonical head. Opens the store with `open_store` (NOT
+/// `init_store`, which would itself hit the boot failure).
+pub async fn seed_head(datadir: &Path, block_json_path: &str, state_root_hex: &str) -> eyre::Result<()> {
+    let store = open_store(datadir).map_err(|e| eyre::eyre!("Failed to open store: {e}"))?;
+
+    let raw = std::fs::read_to_string(block_json_path)
+        .map_err(|e| eyre::eyre!("Failed to read {block_json_path}: {e}"))?;
+    let json: serde_json::Value = serde_json::from_str(&raw)?;
+    // Accept either a full JSON-RPC envelope ({"result": {...}}) or a bare block object.
+    let block_val = json.get("result").cloned().unwrap_or(json);
+    // Keep the REAL mainnet header verbatim (real MPT state_root => real block hash). This is
+    // essential: the next block's parent_hash references the real hash, so catch-up's
+    // `find_parent_header` must find the head under that hash. State reads don't use the
+    // header's state_root (they go to the binary trie/FKV), so keeping the MPT root is fine.
+    let header: BlockHeader = serde_json::from_value(block_val)
+        .map_err(|e| eyre::eyre!("Failed to parse block header from JSON: {e}"))?;
+
+    // `state_root_hex` is the binary-trie root from the migrate output. The only setter,
+    // `Store::set_binary_trie_root`, writes an in-memory map (not persisted), so seeding it
+    // from this separate process is a no-op; we just validate + log it. The trie itself holds
+    // the root; nothing on the boot/catch-up path needs the root map pre-populated for the head.
+    let sr = state_root_hex.trim_start_matches("0x");
+    let bytes = hex::decode(sr).map_err(|e| eyre::eyre!("bad --state-root hex: {e}"))?;
+    eyre::ensure!(bytes.len() == 32, "--state-root must be 32 bytes");
+    let binary_root = H256::from_slice(&bytes);
+
+    let number = header.number;
+    let hash = header.hash();
+    info!(
+        "Seeding head: block {number}, real header hash {:#x}, real state_root {:#x}, binary root {:#x} (not persisted as side-data)",
+        hash, header.state_root, binary_root
+    );
+
+    // Store header (+ empty body) and mark it the canonical head.
+    let block = Block {
+        header: header.clone(),
+        body: BlockBody::default(),
+    };
+    store.add_block(block).await?;
+    store
+        .forkchoice_update(vec![(number, hash)], number, hash, Some(number), Some(number))
+        .await?;
+    store.set_latest_block_number(number)?;
+
+    // Record the binary-trie checkpoint so boot skips block replay. On startup
+    // `regenerate_head_state` reads META_BLOCK_KEY; migrate built the trie nodes but never
+    // wrote it, so it defaulted to 0 and the node tried to replay blocks 1..=head. Mirror
+    // what `BinaryTrieState::flush` persists (block number + base hash).
+    use ethrex_storage::api::tables::BINARY_TRIE_NODES;
+    const META_BLOCK_KEY: &[u8] = &[0xFF, b'B'];
+    const META_BASE_HASH_KEY: &[u8] = &[0xFF, b'H'];
+    store.write_batch(
+        BINARY_TRIE_NODES,
+        vec![
+            (META_BLOCK_KEY.to_vec(), number.to_le_bytes().to_vec()),
+            (META_BASE_HASH_KEY.to_vec(), hash.as_bytes().to_vec()),
+        ],
+    )?;
+    info!("Recorded binary-trie checkpoint at block {number}.");
+
+    info!("Seeded canonical head at block {number}; node can now boot.");
+    Ok(())
+}
+
+/// Populate the `ACCOUNT_CODES` table from a geth code export.
+///
+/// `migrate` consumes the code dump only to write code *chunks* into the binary trie, but the
+/// node (RPC `eth_getCode` and the EVM) reads bytecode from the flat `ACCOUNT_CODES` table via
+/// `get_account_code(code_hash)`. Migrate never populates it, so code reads return empty and
+/// block execution can't fetch contract code. This backfills it from the same `code.rlp`.
+pub async fn seed_code(datadir: &Path, code_path: &str) -> eyre::Result<()> {
+    let store = open_store(datadir).map_err(|e| eyre::eyre!("Failed to open store: {e}"))?;
+    let code_map = parse_code_dump(code_path)?;
+    info!("Populating ACCOUNT_CODES from {} bytecodes", code_map.len());
+
+    const BATCH: usize = 50_000;
+    let mut batch: Vec<(H256, Code)> = Vec::with_capacity(BATCH);
+    let mut written = 0u64;
+    for (code_hash, bytecode) in code_map {
+        let hash = H256(code_hash);
+        // Reuse the known hash (avoid re-keccak); bytecode is the trusted export value.
+        let code = Code::from_bytecode_unchecked(bytecode.into(), hash);
+        batch.push((hash, code));
+        if batch.len() >= BATCH {
+            let n = batch.len() as u64;
+            store
+                .write_account_code_batch(std::mem::take(&mut batch))
+                .await?;
+            written += n;
+            if written % 500_000 == 0 {
+                info!("  wrote {written} bytecodes");
+            }
+        }
+    }
+    if !batch.is_empty() {
+        let n = batch.len() as u64;
+        store.write_account_code_batch(batch).await?;
+        written += n;
+    }
+    info!("Populated ACCOUNT_CODES with {written} bytecodes.");
+    Ok(())
+}
+
+/// Catch-up driver: re-execute mainnet blocks from the migrated checkpoint up to a target,
+/// pulling each block from a local mainnet node over JSON-RPC and applying it to the binary
+/// trie via the blockchain pipeline. The binary-node keeps the REAL mainnet headers/hashes
+/// (so parent continuity holds) and tracks the binary state root as side-data per block.
+///
+/// `add_block_pipeline` executes + stores a block but does NOT advance the canonical head
+/// (that is normally the consensus client's job via forkchoice). So we accumulate the executed
+/// (number, hash) pairs and issue a single `forkchoice_update` at the end to make the range
+/// canonical and move `latest` to the target, then force a final binary-trie flush.
+pub async fn catch_up(
+    datadir: &Path,
+    genesis: Genesis,
+    rpc_url: &str,
+    to: Option<u64>,
+) -> eyre::Result<()> {
+    // --- Set up store + binary trie + blockchain, mirroring the node run path. ---
+    let mut store = init_store(datadir, genesis.clone())
+        .await
+        .map_err(|e| eyre::eyre!("Failed to open store: {e}"))?;
+    let binary_trie_state = init_binary_trie_state(&store, datadir, &genesis)?;
+    store.set_binary_trie_state(binary_trie_state.clone());
+    if store
+        .fkv_account_table_is_empty()
+        .map_err(|e| eyre::eyre!("Failed to check FKV state: {e}"))?
+    {
+        info!("Populating FKV tables from genesis");
+        store
+            .populate_fkv_from_genesis(&genesis.alloc)
+            .map_err(|e| eyre::eyre!("Failed to populate FKV from genesis: {e}"))?;
+    }
+    let blockchain = init_blockchain(
+        store.clone(),
+        BlockchainOptions {
+            r#type: BlockchainType::L1,
+            perf_logs_enabled: true,
+            ..Default::default()
+        },
+    );
+    regenerate_head_state(&store, &blockchain).await?;
+
+    // --- Connect to the local mainnet node and determine the range. ---
+    let url = rpc_url
+        .parse()
+        .map_err(|e| eyre::eyre!("bad rpc url {rpc_url}: {e}"))?;
+    let client = EthClient::new(url).map_err(|e| eyre::eyre!("EthClient init: {e}"))?;
+
+    let head = store.get_latest_block_number().await?;
+    let target = match to {
+        Some(t) => t,
+        None => client
+            .get_block_number()
+            .await
+            .map_err(|e| eyre::eyre!("get tip: {e}"))?
+            .as_u64(),
+    };
+    if target <= head {
+        info!("Nothing to do: head {head} >= target {target}");
+        return Ok(());
+    }
+    info!(
+        "Catch-up: head {head} -> target {target} ({} blocks) from {rpc_url}",
+        target - head
+    );
+
+    // --- Fetch + execute each block. ---
+    let mut canonical: Vec<(u64, ethrex_common::types::BlockHash)> =
+        Vec::with_capacity((target - head) as usize);
+    let started = std::time::Instant::now();
+    let mut last_hash = ethrex_common::types::BlockHash::default();
+    for n in (head + 1)..=target {
+        let rpc_block = client
+            .get_block_by_number(BlockIdentifier::Number(n), true)
+            .await
+            .map_err(|e| eyre::eyre!("fetch block {n}: {e}"))?;
+        let block: Block = rpc_block
+            .try_into()
+            .map_err(|e| eyre::eyre!("convert block {n} to Block: {e}"))?;
+        let bhash = block.hash();
+        blockchain
+            .add_block_pipeline(block, None)
+            .map_err(|e| eyre::eyre!("execute block {n}: {e:?}"))?;
+        canonical.push((n, bhash));
+        last_hash = bhash;
+        if n % 100 == 0 || n == target {
+            let done = n - head;
+            let rate = done as f64 / started.elapsed().as_secs_f64().max(0.001);
+            info!("catch-up: block {n}/{target} ({done} done, {rate:.1} blk/s)");
+        }
+    }
+
+    // --- Make the executed range canonical and advance the head to target. ---
+    info!("Executed {} blocks; updating canonical chain head -> {target}", canonical.len());
+    store
+        .forkchoice_update(canonical, target, last_hash, Some(target), Some(target))
+        .await?;
+
+    // --- Force a final binary-trie flush, then barrier on the background writer. ---
+    // The pipeline only auto-flushes every `flush_threshold` (128) blocks; force the tail.
+    store.flush_binary_trie_if_needed(target, last_hash, 1_000)?;
+    // `reload_binary_trie` sends a no-op through the flush channel and waits for it, which
+    // guarantees the prior flush has hit disk before we exit (then reloads from the checkpoint).
+    let checkpoint = store.reload_binary_trie()?;
+    info!("Catch-up complete: head + binary-trie checkpoint at block {checkpoint} (target {target}).");
     Ok(())
 }
 
