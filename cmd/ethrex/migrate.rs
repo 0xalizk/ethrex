@@ -209,9 +209,14 @@ pub async fn migrate_with_preimages(
 /// `migrate` writes the binary-trie state and the latest block *number*, but not a block
 /// *header* for that number, so the node cannot establish a head and refuses to boot
 /// (`add_initial_state` -> MissingLatestBlockNumber). This takes the head block's
-/// `eth_getBlockByNumber` JSON, swaps in the binary-trie state root (the migrated checkpoint
-/// root), and stores it as the canonical head. Opens the store with `open_store` (NOT
-/// `init_store`, which would itself hit the boot failure).
+/// `eth_getBlockByNumber` JSON and stores the REAL mainnet header verbatim (real MPT
+/// state_root => real block hash) as the canonical head. The real hash is essential: the
+/// next block's `parent_hash` references it, so catch-up's `find_parent_header` must find the
+/// head under that hash. State reads use the binary trie/FKV, not the header's state_root.
+/// `--state-root` (the binary-trie root from the migrate output) is only validated + logged
+/// here — its sole setter `set_binary_trie_root` writes an in-memory map, so there is nothing
+/// to persist from this separate process. Opens the store with `open_store` (NOT `init_store`,
+/// which would itself hit the boot failure).
 pub async fn seed_head(datadir: &Path, block_json_path: &str, state_root_hex: &str) -> eyre::Result<()> {
     let store = open_store(datadir).map_err(|e| eyre::eyre!("Failed to open store: {e}"))?;
 
@@ -319,9 +324,30 @@ pub async fn seed_code(datadir: &Path, code_path: &str) -> eyre::Result<()> {
 /// (so parent continuity holds) and tracks the binary state root as side-data per block.
 ///
 /// `add_block_pipeline` executes + stores a block but does NOT advance the canonical head
-/// (that is normally the consensus client's job via forkchoice). So we accumulate the executed
-/// (number, hash) pairs and issue a single `forkchoice_update` at the end to make the range
-/// canonical and move `latest` to the target, then force a final binary-trie flush.
+/// (that is normally the consensus client's job via forkchoice). So we accumulate executed
+/// (number, hash) pairs and issue a `forkchoice_update` every `FORKCHOICE_EVERY` blocks (plus
+/// once at the end) to make the range canonical and keep `latest` in lockstep with the trie's
+/// mid-loop checkpoint flushes — bounding the resume gap if interrupted — then force a final
+/// binary-trie flush. Resumable: it restarts from `max(latest, trie checkpoint)` so an
+/// interrupted run never re-executes blocks already in the trie.
+async fn fetch_block_number_retry(client: &EthClient) -> eyre::Result<u64> {
+    let mut attempt = 0u32;
+    loop {
+        match client.get_block_number().await {
+            Ok(v) => return Ok(v.as_u64()),
+            Err(e) => {
+                attempt += 1;
+                if attempt >= 5 {
+                    return Err(eyre::eyre!("get tip failed after {attempt} attempts: {e}"));
+                }
+                let d = std::time::Duration::from_millis(500u64 << attempt);
+                warn!("get tip attempt {attempt} failed: {e}; retrying in {d:?}");
+                tokio::time::sleep(d).await;
+            }
+        }
+    }
+}
+
 pub async fn catch_up(
     datadir: &Path,
     genesis: Genesis,
@@ -359,14 +385,29 @@ pub async fn catch_up(
         .map_err(|e| eyre::eyre!("bad rpc url {rpc_url}: {e}"))?;
     let client = EthClient::new(url).map_err(|e| eyre::eyre!("EthClient init: {e}"))?;
 
-    let head = store.get_latest_block_number().await?;
+    let latest = store.get_latest_block_number().await?;
+    // Resume safety: add_block_pipeline auto-flushes the binary-trie checkpoint mid-loop, so a
+    // previously-interrupted run can leave the trie AHEAD of the canonical `latest`. Resume from
+    // whichever is further along — restarting at `latest+1` would re-execute blocks already in
+    // the trie, applying them on top of advanced state and silently corrupting it (see audit_1).
+    let checkpoint = binary_trie_state
+        .read()
+        .map_err(|e| eyre::eyre!("binary trie lock: {e}"))?
+        .checkpoint_block()
+        .unwrap_or(0);
+    let head = latest.max(checkpoint);
+    if checkpoint > latest {
+        warn!(
+            "Resuming: binary-trie checkpoint {checkpoint} is ahead of canonical latest {latest}; \
+             starting at {}. Blocks {}..={checkpoint} are in the trie but not canonical — a benign \
+             canonical-mapping gap (state is intact, the tip will be canonical).",
+            head + 1,
+            latest + 1
+        );
+    }
     let target = match to {
         Some(t) => t,
-        None => client
-            .get_block_number()
-            .await
-            .map_err(|e| eyre::eyre!("get tip: {e}"))?
-            .as_u64(),
+        None => fetch_block_number_retry(&client).await?,
     };
     if target <= head {
         info!("Nothing to do: head {head} >= target {target}");
@@ -377,16 +418,39 @@ pub async fn catch_up(
         target - head
     );
 
-    // --- Fetch + execute each block. ---
-    let mut canonical: Vec<(u64, ethrex_common::types::BlockHash)> =
-        Vec::with_capacity((target - head) as usize);
+    // --- Fetch + execute each block, advancing canonical/latest in lockstep batches. ---
+    // forkchoice_update every FORKCHOICE_EVERY blocks keeps `latest` within that many blocks of
+    // the trie checkpoint, so an interrupted run leaves only a bounded, benign canonical gap
+    // (handled by the resume guard above) rather than pinning `latest` at the start.
+    const FORKCHOICE_EVERY: usize = 256;
+    let mut batch: Vec<(u64, ethrex_common::types::BlockHash)> =
+        Vec::with_capacity(FORKCHOICE_EVERY);
     let started = std::time::Instant::now();
     let mut last_hash = ethrex_common::types::BlockHash::default();
     for n in (head + 1)..=target {
-        let rpc_block = client
-            .get_block_by_number(BlockIdentifier::Number(n), true)
-            .await
-            .map_err(|e| eyre::eyre!("fetch block {n}: {e}"))?;
+        // Bounded retry so a single transient RPC error doesn't abort a multi-hour run.
+        let rpc_block = {
+            let mut attempt = 0u32;
+            loop {
+                match client
+                    .get_block_by_number(BlockIdentifier::Number(n), true)
+                    .await
+                {
+                    Ok(b) => break b,
+                    Err(e) => {
+                        attempt += 1;
+                        if attempt >= 5 {
+                            return Err(eyre::eyre!(
+                                "fetch block {n} failed after {attempt} attempts: {e}"
+                            ));
+                        }
+                        let d = std::time::Duration::from_millis(500u64 << attempt);
+                        warn!("fetch block {n} attempt {attempt} failed: {e}; retrying in {d:?}");
+                        tokio::time::sleep(d).await;
+                    }
+                }
+            }
+        };
         let block: Block = rpc_block
             .try_into()
             .map_err(|e| eyre::eyre!("convert block {n} to Block: {e}"))?;
@@ -394,8 +458,13 @@ pub async fn catch_up(
         blockchain
             .add_block_pipeline(block, None)
             .map_err(|e| eyre::eyre!("execute block {n}: {e:?}"))?;
-        canonical.push((n, bhash));
+        batch.push((n, bhash));
         last_hash = bhash;
+        if batch.len() >= FORKCHOICE_EVERY {
+            store
+                .forkchoice_update(std::mem::take(&mut batch), n, bhash, Some(n), Some(n))
+                .await?;
+        }
         if n % 100 == 0 || n == target {
             let done = n - head;
             let rate = done as f64 / started.elapsed().as_secs_f64().max(0.001);
@@ -403,10 +472,16 @@ pub async fn catch_up(
         }
     }
 
-    // --- Make the executed range canonical and advance the head to target. ---
-    info!("Executed {} blocks; updating canonical chain head -> {target}", canonical.len());
+    // --- Flush the final partial batch and advance the head to target. ---
+    info!("Executed to {target}; finalizing canonical head");
     store
-        .forkchoice_update(canonical, target, last_hash, Some(target), Some(target))
+        .forkchoice_update(
+            std::mem::take(&mut batch),
+            target,
+            last_hash,
+            Some(target),
+            Some(target),
+        )
         .await?;
 
     // --- Force a final binary-trie flush, then barrier on the background writer. ---
