@@ -455,9 +455,14 @@ pub async fn catch_up(
             .try_into()
             .map_err(|e| eyre::eyre!("convert block {n} to Block: {e}"))?;
         let bhash = block.hash();
+        let blk_start = std::time::Instant::now();
+        let db_before =
+            ethrex_binary_trie::node_store::DB_LOADS.load(std::sync::atomic::Ordering::Relaxed);
         blockchain
             .add_block_pipeline(block, None)
             .map_err(|e| eyre::eyre!("execute block {n}: {e:?}"))?;
+        let db_after =
+            ethrex_binary_trie::node_store::DB_LOADS.load(std::sync::atomic::Ordering::Relaxed);
         batch.push((n, bhash));
         last_hash = bhash;
         if batch.len() >= FORKCHOICE_EVERY {
@@ -465,11 +470,13 @@ pub async fn catch_up(
                 .forkchoice_update(std::mem::take(&mut batch), n, bhash, Some(n), Some(n))
                 .await?;
         }
-        if n % 100 == 0 || n == target {
-            let done = n - head;
-            let rate = done as f64 / started.elapsed().as_secs_f64().max(0.001);
-            info!("catch-up: block {n}/{target} ({done} done, {rate:.1} blk/s)");
-        }
+        let done = n - head;
+        let rate = done as f64 / started.elapsed().as_secs_f64().max(0.001);
+        info!(
+            "catch-up: block {n}/{target} ({done} done, {rate:.2} blk/s) -- this block {:.1}s, {} trie node disk-loads",
+            blk_start.elapsed().as_secs_f64(),
+            db_after - db_before,
+        );
     }
 
     // --- Flush the final partial batch and advance the head to target. ---

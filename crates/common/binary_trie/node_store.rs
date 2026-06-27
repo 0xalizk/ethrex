@@ -1,4 +1,5 @@
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lru::LruCache;
@@ -15,6 +16,10 @@ use crate::node::{InternalNode, Node, NodeId, STEM_VALUES, StemNode};
 /// (Previously reduced to 100K when StemNodes carried a per-node subtree
 /// cache of ~10-16 KB each; that cache has since been removed.)
 const DEFAULT_CLEAN_CACHE_CAP: usize = 2_000_000;
+
+/// Instrumentation: cumulative count of nodes loaded from the backend (disk).
+/// Paired with `merkle::MERKELIZE_VISITS` to diagnose catch-up read amplification.
+pub static DB_LOADS: AtomicU64 = AtomicU64::new(0);
 
 // Meta keys for storage (stored alongside nodes in BINARY_TRIE_NODES table).
 // The 0xFF prefix ensures they don't collide with u64 node IDs (8 bytes, no prefix).
@@ -42,10 +47,19 @@ pub fn node_key(id: NodeId) -> [u8; 8] {
 pub fn serialize_node(node: &Node) -> Vec<u8> {
     match node {
         Node::Internal(internal) => {
-            let mut buf = Vec::with_capacity(17);
+            let mut buf = Vec::with_capacity(50);
             buf.push(0x01);
             buf.extend_from_slice(&internal.left.unwrap_or(0).to_le_bytes());
             buf.extend_from_slice(&internal.right.unwrap_or(0).to_le_bytes());
+            // Persisted Merkle hash: presence flag + 32 bytes when set. Legacy
+            // 17-byte nodes (no flag) deserialize with cached_hash = None.
+            match internal.cached_hash {
+                Some(h) => {
+                    buf.push(1);
+                    buf.extend_from_slice(&h);
+                }
+                None => buf.push(0),
+            }
             buf
         }
         Node::Stem(stem) => {
@@ -59,11 +73,19 @@ pub fn serialize_node(node: &Node) -> Vec<u8> {
                 values_buf.extend_from_slice(v);
             }
 
-            let mut buf = Vec::with_capacity(1 + 31 + 32 + values_buf.len());
+            let mut buf = Vec::with_capacity(1 + 31 + 32 + values_buf.len() + 33);
             buf.push(0x02);
             buf.extend_from_slice(&stem.stem);
             buf.extend_from_slice(&bitmap);
             buf.extend_from_slice(&values_buf);
+            // Persisted Merkle hash trails the values: presence flag + 32 bytes.
+            match stem.cached_hash {
+                Some(h) => {
+                    buf.push(1);
+                    buf.extend_from_slice(&h);
+                }
+                None => buf.push(0),
+            }
             buf
         }
     }
@@ -88,10 +110,21 @@ fn deserialize_node(bytes: &[u8]) -> Result<Node, BinaryTrieError> {
             }
             let left_id = u64::from_le_bytes(bytes[1..9].try_into().unwrap());
             let right_id = u64::from_le_bytes(bytes[9..17].try_into().unwrap());
+            // Optional persisted hash: byte 17 is the presence flag.
+            let cached_hash = if bytes.len() >= 18 && bytes[17] == 1 {
+                if bytes.len() < 50 {
+                    return Err(BinaryTrieError::DeserializationError(
+                        "InternalNode cached_hash truncated".to_string(),
+                    ));
+                }
+                Some(bytes[18..50].try_into().unwrap())
+            } else {
+                None
+            };
             Ok(Node::Internal(InternalNode {
                 left: if left_id == 0 { None } else { Some(left_id) },
                 right: if right_id == 0 { None } else { Some(right_id) },
-                cached_hash: None,
+                cached_hash,
             }))
         }
         0x02 => {
@@ -125,10 +158,21 @@ fn deserialize_node(bytes: &[u8]) -> Result<Node, BinaryTrieError> {
                 }
             }
 
+            // Optional persisted hash trails the values: presence flag + 32 bytes.
+            let cached_hash = if offset < bytes.len() && bytes[offset] == 1 {
+                if offset + 33 > bytes.len() {
+                    return Err(BinaryTrieError::DeserializationError(
+                        "StemNode cached_hash truncated".to_string(),
+                    ));
+                }
+                Some(bytes[offset + 1..offset + 33].try_into().unwrap())
+            } else {
+                None
+            };
             Ok(Node::Stem(StemNode {
                 stem,
                 values,
-                cached_hash: None,
+                cached_hash,
             }))
         }
         tag => Err(BinaryTrieError::DeserializationError(format!(
@@ -594,6 +638,7 @@ impl NodeStore {
     // -----------------------------------------------------------------------
 
     fn load_from_db(&self, id: NodeId) -> Result<Node, BinaryTrieError> {
+        DB_LOADS.fetch_add(1, Ordering::Relaxed);
         let backend = self
             .backend
             .as_ref()

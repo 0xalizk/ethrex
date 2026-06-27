@@ -3,6 +3,10 @@ use crate::node::StemNode;
 use crate::node::{Node, NodeId, STEM_VALUES, SUBTREE_SIZE};
 use crate::node_store::NodeStore;
 use crate::trie::BinaryTrie;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Instrumentation: cumulative count of nodes visited by `hash_node_id`.
+pub static MERKELIZE_VISITS: AtomicU64 = AtomicU64::new(0);
 
 /// The canonical empty / zero hash.
 pub const ZERO_HASH: [u8; 32] = [0u8; 32];
@@ -52,6 +56,13 @@ pub(crate) fn hash_node_id(
     id: NodeId,
     subtree_buf: &mut [[u8; 32]; SUBTREE_SIZE],
 ) -> [u8; 32] {
+    let visits = MERKELIZE_VISITS.fetch_add(1, Ordering::Relaxed) + 1;
+    if visits % (1 << 20) == 0 {
+        eprintln!(
+            "[merkelize] visited {visits} nodes, {} db node-loads so far",
+            crate::node_store::DB_LOADS.load(Ordering::Relaxed)
+        );
+    }
     // Take the node out so we can mutate it.
     let node = match store.take(id) {
         Ok(n) => n,

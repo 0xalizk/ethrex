@@ -150,16 +150,16 @@ impl BulkTrieBuilder {
         let left_id = entry.left.map(|(id, _)| id);
         let right_id = entry.right.map(|(id, _)| id);
 
-        let node = Node::Internal(InternalNode {
-            left: left_id,
-            right: right_id,
-            cached_hash: None,
-        });
-
         let mut hash_buf = [0u8; 64];
         hash_buf[..32].copy_from_slice(&left_hash);
         hash_buf[32..].copy_from_slice(&right_hash);
         let hash = merkle_hash_64_pub(&hash_buf);
+
+        let node = Node::Internal(InternalNode {
+            left: left_id,
+            right: right_id,
+            cached_hash: Some(hash),
+        });
 
         (hash, node)
     }
@@ -200,16 +200,16 @@ impl BulkTrieBuilder {
             } else {
                 (None, Some(current.0), ZERO_HASH, current.1)
             };
-            let node = Node::Internal(InternalNode {
-                left: left_id,
-                right: right_id,
-                cached_hash: None,
-            });
-            self.buffer_node(id, &node)?;
             let mut hash_buf = [0u8; 64];
             hash_buf[..32].copy_from_slice(&left_hash);
             hash_buf[32..].copy_from_slice(&right_hash);
             let hash = merkle_hash_64_pub(&hash_buf);
+            let node = Node::Internal(InternalNode {
+                left: left_id,
+                right: right_id,
+                cached_hash: Some(hash),
+            });
+            self.buffer_node(id, &node)?;
             current = (id, hash);
         }
         Ok(current)
@@ -222,12 +222,12 @@ impl BulkTrieBuilder {
         values: &BTreeMap<u8, [u8; 32]>,
     ) -> Result<(), BinaryTrieError> {
         // Create and serialize the StemNode.
+        let stem_hash = Self::compute_stem_hash(&mut self.subtree_buf, &stem, values);
         let stem_node = StemNode {
             stem,
             values: values.clone(),
-            cached_hash: None,
+            cached_hash: Some(stem_hash),
         };
-        let stem_hash = Self::compute_stem_hash(&mut self.subtree_buf, &stem, values);
         let stem_id = self.alloc_id();
         self.buffer_node(stem_id, &Node::Stem(stem_node))?;
 
