@@ -630,6 +630,43 @@ pub async fn store_block_bodies(
     Ok(())
 }
 
+/// Downloads and stores headers + bodies for `from..=to` from mainnet p2p peers.
+/// Used by the `backfill-bodies` subcommand to fill the snap-sync body gap without a full resync.
+/// Requires that no other process holds the store open (stop the mainnet node first).
+pub async fn backfill_block_range(
+    from: u64,
+    to: u64,
+    mut peers: PeerHandler,
+    store: Store,
+) -> Result<(), SyncError> {
+    const HEADER_CHUNK: u64 = 512;
+    let mut n = from;
+    while n <= to {
+        let count = HEADER_CHUNK.min(to - n + 1);
+        // Fetch headers for this chunk, retrying until a peer responds.
+        let headers = loop {
+            match peers.request_headers_by_number(n, count).await? {
+                Some(h) if !h.is_empty() => break h,
+                _ => {
+                    warn!("backfill: no headers for {n}..{}, retrying in 5s", n + count - 1);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        };
+        let fetched = headers.len() as u64;
+        // Write canonical hash mapping so get_block_header/get_block_body find them by number.
+        let pairs: Vec<(u64, ethrex_common::H256)> =
+            headers.iter().map(|h| (h.number, h.hash())).collect();
+        store.add_block_headers(headers.clone()).await?;
+        store.add_canonical_block_hash_batch(pairs).await?;
+        // Fetch and store bodies for this chunk.
+        store_block_bodies(headers, peers.clone(), store.clone()).await?;
+        info!("backfill: {n}..{} done", n + fetched - 1);
+        n += fetched;
+    }
+    Ok(())
+}
+
 pub async fn update_pivot(
     block_number: u64,
     block_timestamp: u64,

@@ -497,6 +497,50 @@ impl PeerHandler {
         }
     }
 
+    /// Request up to `limit` consecutive block headers starting at `start` from any available peer.
+    /// Returns None if no peer responded within the retry budget.
+    pub async fn request_headers_by_number(
+        &mut self,
+        start: u64,
+        limit: u64,
+    ) -> Result<Option<Vec<BlockHeader>>, PeerHandlerError> {
+        let capped = limit.min(BLOCK_HEADER_LIMIT);
+        for _ in 0..REQUEST_RETRY_ATTEMPTS {
+            let request_id = rand::random();
+            let request = RLPxMessage::GetBlockHeaders(GetBlockHeaders {
+                id: request_id,
+                startblock: HashOrNumber::Number(start),
+                limit: capped,
+                skip: 0,
+                reverse: false,
+            });
+            match self.get_random_peer(&SUPPORTED_ETH_CAPABILITIES).await? {
+                None => continue,
+                Some((peer_id, mut connection)) => {
+                    if let Ok(RLPxMessage::BlockHeaders(BlockHeaders {
+                        id: _,
+                        block_headers,
+                    })) = PeerHandler::make_request(
+                        &self.peer_table,
+                        peer_id,
+                        &mut connection,
+                        request,
+                        PEER_REPLY_TIMEOUT,
+                    )
+                    .await
+                    {
+                        if !block_headers.is_empty() {
+                            self.peer_table.record_success(peer_id)?;
+                            return Ok(Some(block_headers));
+                        }
+                    }
+                    self.peer_table.record_failure(peer_id)?;
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Internal method to request block bodies from any suitable peer given their block hashes
     /// Returns the block bodies or None if:
     /// - There are no available peers (the node just started up or was rejected by all other nodes)

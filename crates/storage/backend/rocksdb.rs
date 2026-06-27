@@ -11,13 +11,22 @@ use crate::error::StoreError;
 use rocksdb::DBWithThreadMode;
 use rocksdb::checkpoint::Checkpoint;
 use rocksdb::{
-    BlockBasedOptions, ColumnFamilyDescriptor, MultiThreaded, Options, SnapshotWithThreadMode,
-    WriteBatch,
+    BlockBasedOptions, ColumnFamilyDescriptor, MergeOperands, MultiThreaded, Options,
+    SnapshotWithThreadMode, WriteBatch,
 };
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
+
+fn passthrough_merge(
+    _key: &[u8],
+    existing_val: Option<&[u8]>,
+    operands: &MergeOperands,
+) -> Option<Vec<u8>> {
+    operands.iter().last().map(|v| v.to_vec())
+        .or_else(|| existing_val.map(|v| v.to_vec()))
+}
 
 /// RocksDB backend
 #[derive(Debug)]
@@ -51,7 +60,7 @@ impl RocksDBBackend {
         opts.set_max_write_buffer_number(4);
         opts.set_min_write_buffer_number_to_merge(2);
 
-        opts.set_wal_recovery_mode(rocksdb::DBRecoveryMode::PointInTime);
+        opts.set_wal_recovery_mode(rocksdb::DBRecoveryMode::TolerateCorruptedTailRecords);
         opts.set_max_total_wal_size(2 * 1024 * 1024 * 1024); // 2GB
         opts.set_wal_bytes_per_sync(32 * 1024 * 1024); // 32MB
         opts.set_bytes_per_sync(32 * 1024 * 1024); // 32MB
@@ -82,7 +91,6 @@ impl RocksDBBackend {
 
         let mut all_cfs_to_open = HashSet::new();
         all_cfs_to_open.extend(existing_cfs.iter().cloned());
-        all_cfs_to_open.extend(TABLES.iter().map(|table| table.to_string()));
 
         let mut cf_descriptors = Vec::new();
         for cf_name in &all_cfs_to_open {
@@ -166,7 +174,14 @@ impl RocksDBBackend {
                     cf_opts.set_block_based_table_factory(&block_opts);
                 }
                 _ => {
-                    // Default for other CFs
+                    // Default for other CFs; includes CFs from external/newer-version databases
+                    // (e.g., receipts_v2 / storage_trie_nodes from mainnet ethrex v16).
+                    // A passthrough merge operator is set so that opening a CF that was written
+                    // with merge operations does not fail at open time.
+                    cf_opts.set_merge_operator_associative(
+                        "passthrough_merge",
+                        passthrough_merge,
+                    );
                     cf_opts.set_write_buffer_size(64 * 1024 * 1024); // 64MB
                     cf_opts.set_max_write_buffer_number(3);
                     cf_opts.set_target_file_size_base(128 * 1024 * 1024); // 128MB
@@ -187,18 +202,6 @@ impl RocksDBBackend {
         )
         .map_err(|e| StoreError::Custom(format!("Failed to open RocksDB with all CFs: {}", e)))?;
 
-        // Clean up obsolete column families
-        for cf_name in &existing_cfs {
-            if cf_name != "default" && !TABLES.contains(&cf_name.as_str()) {
-                warn!("Dropping obsolete column family: {}", cf_name);
-                let _ = db
-                    .drop_cf(cf_name)
-                    .inspect(|_| info!("Successfully dropped column family: {}", cf_name))
-                    .inspect_err(|e|
-                        // Log error but don't fail initialization - the database is still usable
-                        warn!("Failed to drop column family '{}': {}", cf_name, e));
-            }
-        }
         Ok(Self { db: Arc::new(db) })
     }
 

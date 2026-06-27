@@ -406,7 +406,8 @@ impl Store {
         block_number: BlockNumber,
     ) -> Result<Option<BlockHeader>, StoreError> {
         let latest = self.latest_block_header.get();
-        if block_number == latest.number {
+        // Block 0 must not come from the default cache (zeroed header → wrong genesis hash).
+        if block_number != 0 && block_number == latest.number {
             return Ok(Some((*latest).clone()));
         }
         self.load_block_header(block_number)
@@ -951,6 +952,27 @@ impl Store {
     }
 
     // Get the canonical block hash for a given block number.
+    /// Batch-write canonical block hash entries for a contiguous range of headers.
+    /// Used by body-backfill to mark snap-synced gap blocks as canonical so
+    /// `get_block_header` / `get_block_body` can find them by number.
+    pub async fn add_canonical_block_hash_batch(
+        &self,
+        pairs: Vec<(BlockNumber, BlockHash)>,
+    ) -> Result<(), StoreError> {
+        let db = self.backend.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut txn = db.begin_write()?;
+            for (number, hash) in pairs {
+                let key = number.to_le_bytes();
+                let value = hash.encode_to_vec();
+                txn.put(CANONICAL_BLOCK_HASHES, &key, &value)?;
+            }
+            txn.commit()
+        })
+        .await
+        .map_err(|e| StoreError::Custom(format!("Task panicked: {e}")))?
+    }
+
     pub async fn get_canonical_block_hash(
         &self,
         block_number: BlockNumber,
@@ -1527,6 +1549,30 @@ impl Store {
             validate_store_schema_version(&db_path)?;
         }
 
+        match engine_type {
+            #[cfg(feature = "rocksdb")]
+            EngineType::RocksDB => {
+                let backend = Arc::new(RocksDBBackend::open(path)?);
+                Self::from_backend(backend, db_path, DB_COMMIT_THRESHOLD)
+            }
+            EngineType::InMemory => {
+                let backend = Arc::new(InMemoryBackend::open()?);
+                Self::from_backend(backend, db_path, IN_MEMORY_COMMIT_THRESHOLD)
+            }
+        }
+    }
+
+    /// Like `new`, but skips the metadata schema-version check.
+    ///
+    /// Use only when opening a DB whose schema version was written by a different (newer) build
+    /// and you know the column families you will touch are layout-compatible — e.g. the
+    /// `backfill-bodies` tool opening the mainnet EL datadir to write headers/bodies/canonical
+    /// hashes without touching any schema-version-gated columns.
+    pub fn new_unchecked(
+        path: impl AsRef<Path>,
+        engine_type: EngineType,
+    ) -> Result<Self, StoreError> {
+        let db_path = path.as_ref().to_path_buf();
         match engine_type {
             #[cfg(feature = "rocksdb")]
             EngineType::RocksDB => {

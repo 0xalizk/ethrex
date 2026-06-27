@@ -1,3 +1,4 @@
+pub mod backfill;
 pub mod bulk_builder;
 pub mod cli;
 pub mod initializers;

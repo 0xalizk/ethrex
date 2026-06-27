@@ -603,6 +603,24 @@ pub enum Subcommand {
         code_path: String,
     },
     #[command(
+        name = "backfill-bodies",
+        about = "Download and store missing block bodies from the p2p network for a block range (fills the snap-sync body gap)"
+    )]
+    BackfillBodies {
+        #[arg(
+            long,
+            value_name = "BLOCK",
+            help = "First block number to backfill (inclusive)"
+        )]
+        from: u64,
+        #[arg(
+            long,
+            value_name = "BLOCK",
+            help = "Last block number to backfill (inclusive)"
+        )]
+        to: u64,
+    },
+    #[command(
         name = "catch-up",
         about = "Re-execute mainnet blocks from the migrated checkpoint up to a target, pulling them from a local node"
     )]
@@ -757,6 +775,9 @@ impl Subcommand {
             }
             Subcommand::SeedCode { code_path } => {
                 crate::migrate::seed_code(&effective_datadir, &code_path).await?;
+            }
+            Subcommand::BackfillBodies { from, to } => {
+                crate::backfill::backfill_bodies(&effective_datadir, from, to, opts, &network).await?;
             }
             Subcommand::CatchUp { rpc_url, to } => {
                 let genesis = network.get_genesis()?;

@@ -170,6 +170,20 @@ pub fn open_store(datadir: &Path) -> Result<Store, StoreError> {
     }
 }
 
+/// Like `open_store` but skips the metadata schema-version check.
+/// Use only for the `backfill-bodies` tool opening the mainnet EL datadir.
+pub fn open_store_unchecked(datadir: &Path) -> Result<Store, StoreError> {
+    if is_memory_datadir(datadir) {
+        Store::new_unchecked(datadir, EngineType::InMemory)
+    } else {
+        #[cfg(feature = "rocksdb")]
+        let engine_type = EngineType::RocksDB;
+        #[cfg(feature = "metrics")]
+        ethrex_metrics::process::set_datadir_path(datadir.to_path_buf());
+        Store::new_unchecked(datadir, engine_type)
+    }
+}
+
 /// Opens or creates the binary trie state, applying genesis if empty.
 ///
 /// Uses the store's backend via the `TrieBackend` trait, so it works
