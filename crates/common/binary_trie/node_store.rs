@@ -7,7 +7,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::db::{TrieBackend, WriteOp};
 use crate::error::BinaryTrieError;
-use crate::node::{InternalNode, Node, NodeId, STEM_VALUES, StemNode};
+use crate::node::{InternalNode, Node, NodeId, STEM_VALUES, SUBTREE_SIZE, StemNode};
 
 /// Default maximum number of clean nodes kept in the LRU cache.
 ///
@@ -20,6 +20,18 @@ const DEFAULT_CLEAN_CACHE_CAP: usize = 2_000_000;
 /// Instrumentation: cumulative count of nodes loaded from the backend (disk).
 /// Paired with `merkle::MERKELIZE_VISITS` to diagnose catch-up read amplification.
 pub static DB_LOADS: AtomicU64 = AtomicU64::new(0);
+
+/// Number of node writes batched per write_batch during the rehash pass.
+const REHASH_BATCH: usize = 200_000;
+
+/// Mutable state threaded through the recursive rehash-and-persist walk.
+struct RehashCtx {
+    batch: Vec<WriteOp>,
+    subtree_buf: Box<[[u8; 32]; SUBTREE_SIZE]>,
+    visited: u64,
+    written: u64,
+    started: std::time::Instant,
+}
 
 // Meta keys for storage (stored alongside nodes in BINARY_TRIE_NODES table).
 // The 0xFF prefix ensures they don't collide with u64 node IDs (8 bytes, no prefix).
@@ -649,6 +661,100 @@ impl NodeStore {
             None => Err(BinaryTrieError::NodeNotFound(id)),
         }
     }
+
+    /// One-time pass: walk the entire on-disk trie post-order, compute the
+    /// Merkle hash of every node, and persist it (cached_hash) back to disk.
+    /// After this, merkelize short-circuits on any disk-loaded node and per-block
+    /// root computation only touches changed paths -- the property the MPT gets
+    /// for free from content-addressing.
+    ///
+    /// Bounded memory: each node is read once, hashed, written once (recursion
+    /// depth <= trie depth; writes are batched). Resumable: a node already
+    /// carrying a persisted hash -- and therefore its whole subtree, since writes
+    /// are post-order in ordered batches -- is skipped.
+    pub fn rehash_and_persist(&self) -> Result<[u8; 32], BinaryTrieError> {
+        let Some(root) = self.load_root() else {
+            return Ok(crate::merkle::ZERO_HASH);
+        };
+        let mut ctx = RehashCtx {
+            batch: Vec::with_capacity(REHASH_BATCH),
+            subtree_buf: Box::new([[0u8; 32]; SUBTREE_SIZE]),
+            visited: 0,
+            written: 0,
+            started: std::time::Instant::now(),
+        };
+        let root_hash = self.rehash_node(root, &mut ctx)?;
+        if !ctx.batch.is_empty() {
+            let backend = self
+                .backend
+                .as_ref()
+                .ok_or(BinaryTrieError::NodeNotFound(root))?;
+            backend.write_batch(std::mem::take(&mut ctx.batch))?;
+        }
+        eprintln!(
+            "[rehash] complete: {} visited, {} written, {:.0}s",
+            ctx.visited,
+            ctx.written,
+            ctx.started.elapsed().as_secs_f64()
+        );
+        Ok(root_hash)
+    }
+
+    fn rehash_node(&self, id: NodeId, ctx: &mut RehashCtx) -> Result<[u8; 32], BinaryTrieError> {
+        let node = self.load_from_db(id)?;
+        ctx.visited += 1;
+        if ctx.visited % (1 << 20) == 0 {
+            eprintln!(
+                "[rehash] {} visited, {} written, {:.0}s elapsed",
+                ctx.visited,
+                ctx.written,
+                ctx.started.elapsed().as_secs_f64()
+            );
+        }
+        let (node_to_write, hash) = match node {
+            Node::Internal(mut internal) => {
+                if let Some(h) = internal.cached_hash {
+                    return Ok(h);
+                }
+                let left = match internal.left {
+                    Some(l) => self.rehash_node(l, ctx)?,
+                    None => crate::merkle::ZERO_HASH,
+                };
+                let right = match internal.right {
+                    Some(r) => self.rehash_node(r, ctx)?,
+                    None => crate::merkle::ZERO_HASH,
+                };
+                let mut buf = [0u8; 64];
+                buf[..32].copy_from_slice(&left);
+                buf[32..].copy_from_slice(&right);
+                let h = crate::merkle::merkle_hash_64_pub(&buf);
+                internal.cached_hash = Some(h);
+                (Node::Internal(internal), h)
+            }
+            Node::Stem(mut stem) => {
+                if let Some(h) = stem.cached_hash {
+                    return Ok(h);
+                }
+                let h = crate::merkle::hash_stem(&stem, &mut ctx.subtree_buf);
+                stem.cached_hash = Some(h);
+                (Node::Stem(stem), h)
+            }
+        };
+        ctx.batch.push(WriteOp::Put {
+            table: self.nodes_table,
+            key: Box::from(node_key(id)),
+            value: serialize_node(&node_to_write),
+        });
+        ctx.written += 1;
+        if ctx.batch.len() >= REHASH_BATCH {
+            let backend = self
+                .backend
+                .as_ref()
+                .ok_or(BinaryTrieError::NodeNotFound(id))?;
+            backend.write_batch(std::mem::take(&mut ctx.batch))?;
+        }
+        Ok(hash)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -667,6 +773,41 @@ mod tests {
     }
 
     // --- create / get / take / put / free cycle ---
+
+    #[test]
+    fn serialize_roundtrip_with_cached_hash() {
+        let h = [0x5au8; 32];
+        let internal = Node::Internal(InternalNode {
+            left: Some(3),
+            right: Some(7),
+            cached_hash: Some(h),
+        });
+        match deserialize_node(&serialize_node(&internal)).unwrap() {
+            Node::Internal(n) => {
+                assert_eq!(n.left, Some(3));
+                assert_eq!(n.right, Some(7));
+                assert_eq!(n.cached_hash, Some(h));
+            }
+            _ => panic!("expected internal"),
+        }
+        let mut sn = StemNode::new([9u8; 31]);
+        sn.set_value(5, [1u8; 32]);
+        sn.cached_hash = Some(h);
+        match deserialize_node(&serialize_node(&Node::Stem(sn))).unwrap() {
+            Node::Stem(n) => {
+                assert_eq!(n.cached_hash, Some(h));
+                assert_eq!(n.values.get(&5), Some(&[1u8; 32]));
+            }
+            _ => panic!("expected stem"),
+        }
+        let mut legacy = vec![0x01u8];
+        legacy.extend_from_slice(&3u64.to_le_bytes());
+        legacy.extend_from_slice(&7u64.to_le_bytes());
+        match deserialize_node(&legacy).unwrap() {
+            Node::Internal(n) => assert_eq!(n.cached_hash, None),
+            _ => panic!("expected internal"),
+        }
+    }
 
     #[test]
     fn create_and_get_internal() {

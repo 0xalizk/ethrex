@@ -51,6 +51,17 @@ pub fn merkelize(trie: &mut BinaryTrie) -> [u8; 32] {
     }
 }
 
+/// Compute a StemNode Merkle hash: hash(stem || 0x00 || subtree_root).
+/// Public for the one-time rehash-and-persist pass.
+pub fn hash_stem(stem_node: &StemNode, subtree_buf: &mut [[u8; 32]; SUBTREE_SIZE]) -> [u8; 32] {
+    let subtree_root = compute_subtree_root(stem_node, subtree_buf);
+    let mut buf = [0u8; 64];
+    buf[..31].copy_from_slice(&stem_node.stem);
+    buf[31] = 0x00;
+    buf[32..].copy_from_slice(&subtree_root);
+    merkle_hash_64(&buf)
+}
+
 pub(crate) fn hash_node_id(
     store: &mut NodeStore,
     id: NodeId,

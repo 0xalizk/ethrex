@@ -348,6 +348,23 @@ async fn fetch_block_number_retry(client: &EthClient) -> eyre::Result<u64> {
     }
 }
 
+/// One-time maintenance pass over a migrated datadir: compute and persist the
+/// Merkle hash of every binary-trie node so subsequent root computations (and
+/// catch-up) only re-hash changed paths instead of re-walking the whole trie.
+pub async fn rehash(datadir: &Path, genesis: Genesis) -> eyre::Result<()> {
+    let mut store = init_store(datadir, genesis.clone())
+        .await
+        .map_err(|e| eyre::eyre!("Failed to open store: {e}"))?;
+    let binary_trie_state = init_binary_trie_state(&store, datadir, &genesis)?;
+    store.set_binary_trie_state(binary_trie_state.clone());
+    info!("Rehash: walking the binary trie to compute + persist all node hashes (one-time)...");
+    let root = store
+        .rehash_binary_trie()
+        .map_err(|e| eyre::eyre!("rehash failed: {e}"))?;
+    info!("Rehash complete. Binary trie root: {:#x}", H256::from(root));
+    Ok(())
+}
+
 pub async fn catch_up(
     datadir: &Path,
     genesis: Genesis,

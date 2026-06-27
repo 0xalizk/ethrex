@@ -286,6 +286,12 @@ impl BinaryTrieState {
         self.trie.store.clear_warm_nodes();
     }
 
+    /// One-time pass: compute and persist the Merkle hash of every node to disk.
+    /// See NodeStore::rehash_and_persist.
+    pub fn rehash_and_persist(&self) -> Result<[u8; 32], BinaryTrieError> {
+        self.trie.store.rehash_and_persist()
+    }
+
     /// Number of dirty (modified, unflushed) nodes.
     pub fn dirty_node_count(&self) -> usize {
         self.trie.store.dirty_len()
@@ -1510,6 +1516,45 @@ mod tests {
         fn open_test_state() -> BinaryTrieState {
             let backend = Arc::new(MemoryTrieBackend::default());
             BinaryTrieState::open(backend, NODES_TABLE, STORAGE_KEYS_TABLE).unwrap()
+        }
+
+        #[test]
+        fn rehash_persist_matches_merkelize() {
+            let backend = Arc::new(MemoryTrieBackend::default());
+            {
+                let mut state =
+                    BinaryTrieState::open(backend.clone(), NODES_TABLE, STORAGE_KEYS_TABLE)
+                        .unwrap();
+                for i in 0u8..64 {
+                    let mut key = [0u8; 32];
+                    key[0] = i;
+                    key[31] = i;
+                    let mut val = [0u8; 32];
+                    val[0] = i.wrapping_add(1);
+                    state.trie_insert(key, val).unwrap();
+                }
+                state.flush(1, H256::zero()).unwrap();
+            }
+            let root_ref = {
+                let mut state =
+                    BinaryTrieState::open(backend.clone(), NODES_TABLE, STORAGE_KEYS_TABLE)
+                        .unwrap();
+                state.state_root()
+            };
+            let root_rehash = {
+                let state =
+                    BinaryTrieState::open(backend.clone(), NODES_TABLE, STORAGE_KEYS_TABLE)
+                        .unwrap();
+                state.rehash_and_persist().unwrap()
+            };
+            assert_eq!(root_rehash, root_ref, "rehash root must equal merkelize root");
+            let root_after = {
+                let mut state =
+                    BinaryTrieState::open(backend.clone(), NODES_TABLE, STORAGE_KEYS_TABLE)
+                        .unwrap();
+                state.state_root()
+            };
+            assert_eq!(root_after, root_ref, "persisted hashes must round-trip");
         }
 
         #[test]

@@ -1724,6 +1724,22 @@ impl Store {
     ///
     /// On non-RocksDB backends, clears layers/root map and returns 0
     /// (the trie has no persistent checkpoint).
+    /// One-time pass: compute and persist the Merkle hash of every binary-trie
+    /// node to disk. Returns the trie root. Read lock is sufficient -- the walk
+    /// writes via the backend, not the in-memory tiers.
+    pub fn rehash_binary_trie(&self) -> Result<[u8; 32], StoreError> {
+        let bts = self
+            .binary_trie_state
+            .as_ref()
+            .ok_or_else(|| StoreError::Custom("binary trie state not initialized".to_string()))?;
+        let state = bts
+            .read()
+            .map_err(|_| StoreError::Custom("binary trie lock poisoned".to_string()))?;
+        state
+            .rehash_and_persist()
+            .map_err(|e| StoreError::Custom(format!("binary trie rehash failed: {e}")))
+    }
+
     pub fn reload_binary_trie(&self) -> Result<u64, StoreError> {
         // Synchronous flush: ensure any in-flight background write completes before
         // we reload from the checkpoint. We create a completion channel and send a

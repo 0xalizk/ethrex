@@ -638,6 +638,11 @@ pub enum Subcommand {
         )]
         to: Option<u64>,
     },
+    #[command(
+        name = "rehash",
+        about = "One-time pass: compute and persist every binary-trie node Merkle hash to disk"
+    )]
+    Rehash {},
     #[cfg(feature = "l2")]
     #[command(name = "l2")]
     L2(crate::l2::L2Command),
@@ -782,6 +787,10 @@ impl Subcommand {
             Subcommand::CatchUp { rpc_url, to } => {
                 let genesis = network.get_genesis()?;
                 crate::migrate::catch_up(&effective_datadir, genesis, &rpc_url, to).await?;
+            }
+            Subcommand::Rehash {} => {
+                let genesis = network.get_genesis()?;
+                crate::migrate::rehash(&effective_datadir, genesis).await?;
             }
             #[cfg(feature = "l2")]
             Subcommand::L2(command) => command.run().await?,
